@@ -1,9 +1,12 @@
 use anyhow::Result;
 use futures_util::StreamExt;
 use reqwest::Response;
+use serde_json::json;
 use serde_json::Value;
 
 use crate::domain::codex::ParsedSseEvent;
+
+const MAX_SSE_BUFFER_BYTES: usize = 10 * 1024 * 1024;
 
 pub fn parse_sse_response(
     response: Response,
@@ -11,14 +14,21 @@ pub fn parse_sse_response(
     async_stream::try_stream! {
         let mut buffer = String::new();
         let mut stream = response.bytes_stream();
+        let mut yielded_any = false;
 
         while let Some(item) = stream.next().await {
             let chunk = item?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
+            if buffer.len() > MAX_SSE_BUFFER_BYTES {
+                Err(anyhow::anyhow!(
+                    "SSE buffer exceeded {MAX_SSE_BUFFER_BYTES} bytes"
+                ))?;
+            }
 
             while let Some((block, remaining)) = split_next_block(&buffer) {
                 buffer = remaining;
                 if let Some(parsed) = parse_sse_block(&block)? {
+                    yielded_any = true;
                     yield parsed;
                 }
             }
@@ -27,6 +37,8 @@ pub fn parse_sse_response(
         if !buffer.trim().is_empty() {
             if let Some(parsed) = parse_sse_block(&buffer)? {
                 yield parsed;
+            } else if !yielded_any {
+                yield build_non_sse_error_event(buffer.trim());
             }
         }
     }
@@ -86,6 +98,34 @@ fn parse_sse_block(block: &str) -> Result<Option<ParsedSseEvent>> {
     }))
 }
 
+fn build_non_sse_error_event(raw: &str) -> ParsedSseEvent {
+    let message = serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|v| {
+            v.get("detail")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| {
+                    v.get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                })
+        })
+        .unwrap_or_else(|| raw.to_string());
+
+    ParsedSseEvent::Json {
+        event: Some("error".to_string()),
+        payload: json!({
+            "type": "error",
+            "error": {
+                "code": "non_sse_response",
+                "message": message
+            }
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,12 +133,14 @@ mod tests {
     fn parse_chunks(chunks: &[&str]) -> Vec<ParsedSseEvent> {
         let mut out = Vec::new();
         let mut buffer = String::new();
+        let mut yielded_any = false;
 
         for chunk in chunks {
             buffer.push_str(chunk);
             while let Some((block, remaining)) = split_next_block(&buffer) {
                 buffer = remaining;
                 if let Some(parsed) = parse_sse_block(&block).expect("parser") {
+                    yielded_any = true;
                     out.push(parsed);
                 }
             }
@@ -107,6 +149,8 @@ mod tests {
         if !buffer.trim().is_empty() {
             if let Some(parsed) = parse_sse_block(&buffer).expect("parser") {
                 out.push(parsed);
+            } else if !yielded_any {
+                out.push(build_non_sse_error_event(buffer.trim()));
             }
         }
 
@@ -134,5 +178,25 @@ mod tests {
     fn parses_missing_newline_at_end() {
         let events = parse_chunks(&["data: {\"type\":\"response.completed\"}"]);
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn emits_non_sse_error_when_body_is_plain_json() {
+        let events = parse_chunks(&["{\"detail\":\"cloudflare challenge\"}"]);
+        let first = events.first().expect("event");
+
+        match first {
+            ParsedSseEvent::Json { event, payload } => {
+                assert_eq!(event.as_deref(), Some("error"));
+                assert_eq!(
+                    payload
+                        .get("error")
+                        .and_then(|v| v.get("code"))
+                        .and_then(Value::as_str),
+                    Some("non_sse_response")
+                );
+            }
+            ParsedSseEvent::Done => panic!("unexpected done event"),
+        }
     }
 }

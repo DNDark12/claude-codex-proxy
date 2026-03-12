@@ -6,7 +6,7 @@ use uuid::Uuid;
 use warp::{http::StatusCode, Filter, Reply};
 
 use crate::domain::anthropic::{AnthropicError, AnthropicErrorBody, AnthropicMessagesRequest};
-use crate::domain::codex::CodexResponsesRequest;
+use crate::domain::codex::{CodexResponsesRequest, CodexToolChoice};
 use crate::domain::openai::ChatCompletionsRequest;
 use crate::proxy::codex_client::{CodexClient, UpstreamError};
 use crate::translation::anthropic_to_codex::translate_anthropic_to_codex;
@@ -15,6 +15,7 @@ use crate::translation::codex_to_anthropic::{
 };
 use crate::translation::codex_to_openai::{collect_codex_to_openai, stream_codex_to_openai};
 use crate::translation::openai_to_codex::translate_openai_to_codex;
+use crate::translation::tool_runtime::ToolRegistry;
 
 #[derive(Clone)]
 struct AppState {
@@ -164,6 +165,7 @@ async fn handle_openai_chat(
         &headers,
     );
 
+    let tool_registry = ToolRegistry::from_openai_request(&request);
     let codex_request = translate_openai_to_codex(&request);
     let has_tools = codex_request
         .tools
@@ -198,14 +200,14 @@ async fn handle_openai_chat(
     };
 
     if request.stream.unwrap_or(false) {
-        let stream = stream_codex_to_openai(response, request.model, trace_id);
+        let stream = stream_codex_to_openai(response, request.model, trace_id, tool_registry);
         let sse = warp::sse::reply(warp::sse::keep_alive().stream(stream));
         let sse = warp::reply::with_header(sse, "cache-control", "no-cache");
         let sse = warp::reply::with_header(sse, "x-accel-buffering", "no");
         return Ok(sse.into_response());
     }
 
-    match collect_codex_to_openai(response, request.model).await {
+    match collect_codex_to_openai(response, request.model, &trace_id, tool_registry).await {
         Ok(payload) => Ok(warp::reply::json(&payload).into_response()),
         Err(e) => {
             log::warn!("[{trace_id}] collect error: {e}");
@@ -247,6 +249,7 @@ async fn handle_anthropic_messages(
         &headers,
     );
 
+    let tool_registry = ToolRegistry::from_anthropic_request(&request);
     let codex_request = translate_anthropic_to_codex(&request);
     let has_tools = codex_request
         .tools
@@ -269,9 +272,9 @@ async fn handle_anthropic_messages(
                 truncate(&body, 240)
             );
             return Ok(anthropic_error(
-                StatusCode::BAD_GATEWAY,
-                "api_error",
-                "Upstream error",
+                status,
+                anthropic_error_type_for_status(status),
+                anthropic_error_message_for_status(status),
             ));
         }
         Err(UpstreamError::Transport(e)) => {
@@ -285,14 +288,14 @@ async fn handle_anthropic_messages(
     };
 
     if request.stream.unwrap_or(false) {
-        let stream = stream_codex_to_anthropic(response, request.model, trace_id);
+        let stream = stream_codex_to_anthropic(response, request.model, trace_id, tool_registry);
         let sse = warp::sse::reply(warp::sse::keep_alive().stream(stream));
         let sse = warp::reply::with_header(sse, "cache-control", "no-cache");
         let sse = warp::reply::with_header(sse, "x-accel-buffering", "no");
         return Ok(sse.into_response());
     }
 
-    match collect_codex_to_anthropic(response, request.model).await {
+    match collect_codex_to_anthropic(response, request.model, &trace_id, tool_registry).await {
         Ok(payload) => Ok(warp::reply::json(&payload).into_response()),
         Err(e) => {
             log::warn!("[{trace_id}] collect error: {e}");
@@ -311,11 +314,21 @@ async fn request_with_tool_fallback(
     has_tools: bool,
     trace_id: &str,
 ) -> std::result::Result<reqwest::Response, UpstreamError> {
+    let disable_fallback = tool_fallback_disabled();
+    let tool_required = tool_choice_requires_tool(request.tool_choice.as_ref());
+
     match client.create_response(&request).await {
         Ok(v) => Ok(v),
-        Err(UpstreamError::Upstream { status: _, body })
+        Err(UpstreamError::Upstream { status, body })
             if has_tools && CodexClient::is_tool_unsupported(&body) =>
         {
+            if disable_fallback || tool_required {
+                log::warn!(
+                    "[{trace_id}] tool unsupported by upstream; fallback disabled (required={tool_required}, env_disabled={disable_fallback})"
+                );
+                return Err(UpstreamError::Upstream { status, body });
+            }
+
             log::warn!("[{trace_id}] tool unsupported by upstream, retrying once without tools");
             request.tools = None;
             request.tool_choice = None;
@@ -351,6 +364,32 @@ fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> warp:
     warp::reply::with_status(warp::reply::json(&body), status).into_response()
 }
 
+fn anthropic_error_type_for_status(status: StatusCode) -> &'static str {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return "rate_limit_error";
+    }
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return "authentication_error";
+    }
+    if status.is_client_error() {
+        return "invalid_request_error";
+    }
+    "api_error"
+}
+
+fn anthropic_error_message_for_status(status: StatusCode) -> &'static str {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return "Rate limit reached on upstream provider";
+    }
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return "Authentication failed on upstream provider";
+    }
+    if status.is_client_error() {
+        return "Upstream rejected request";
+    }
+    "Upstream error"
+}
+
 fn log_request_summary(
     trace_id: &str,
     protocol: &str,
@@ -377,4 +416,46 @@ fn truncate(v: &str, max: usize) -> String {
     }
 
     format!("{}...", &v[..max])
+}
+
+fn tool_choice_requires_tool(choice: Option<&CodexToolChoice>) -> bool {
+    match choice {
+        Some(CodexToolChoice::Function { .. }) => true,
+        Some(CodexToolChoice::Strategy(v)) => {
+            let v = v.to_ascii_lowercase();
+            v == "required" || v == "any" || v == "tool"
+        }
+        None => false,
+    }
+}
+
+fn tool_fallback_disabled() -> bool {
+    std::env::var("DISABLE_TOOL_FALLBACK")
+        .ok()
+        .map(|v| {
+            let v = v.to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_required_tool_choice() {
+        assert!(tool_choice_requires_tool(Some(&CodexToolChoice::Strategy(
+            "required".to_string(),
+        ))));
+        assert!(tool_choice_requires_tool(Some(
+            &CodexToolChoice::Function {
+                choice_type: "function".to_string(),
+                name: "read_file".to_string(),
+            }
+        )));
+        assert!(!tool_choice_requires_tool(Some(
+            &CodexToolChoice::Strategy("auto".to_string(),)
+        )));
+    }
 }

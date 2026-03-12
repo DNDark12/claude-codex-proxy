@@ -52,7 +52,15 @@ impl CodexEventExtractor {
                 out.text_delta = payload
                     .get("delta")
                     .and_then(Value::as_str)
-                    .map(ToString::to_string);
+                    .map(ToString::to_string)
+                    .or_else(|| payload.as_str().map(ToString::to_string));
+            }
+            "response.output_text.done" => {
+                out.text_delta = payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+                    .or_else(|| payload.as_str().map(ToString::to_string));
             }
             "response.output_item.delta" => {
                 out.text_delta = payload
@@ -72,7 +80,15 @@ impl CodexEventExtractor {
                 out.reasoning_delta = payload
                     .get("delta")
                     .and_then(Value::as_str)
-                    .map(ToString::to_string);
+                    .map(ToString::to_string)
+                    .or_else(|| payload.as_str().map(ToString::to_string));
+            }
+            "response.reasoning_summary_text.done" => {
+                out.reasoning_delta = payload
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+                    .or_else(|| payload.as_str().map(ToString::to_string));
             }
             "response.output_item.added" => {
                 if let Some(item) = payload.get("item") {
@@ -190,22 +206,32 @@ impl CodexEventExtractor {
                 }
             }
             "error" | "response.failed" => {
-                let err_obj = payload.get("error").unwrap_or(&payload);
-                out.error = Some(CodexErrorEvent {
-                    code: err_obj
-                        .get("code")
-                        .and_then(Value::as_str)
-                        .unwrap_or("upstream_error")
-                        .to_string(),
-                    message: err_obj
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown upstream error")
-                        .to_string(),
+                out.error = Some(if let Some(message) = payload.as_str() {
+                    CodexErrorEvent {
+                        code: "upstream_error".to_string(),
+                        message: message.to_string(),
+                    }
+                } else {
+                    let err_obj = payload.get("error").unwrap_or(&payload);
+                    CodexErrorEvent {
+                        code: err_obj
+                            .get("code")
+                            .and_then(Value::as_str)
+                            .unwrap_or("upstream_error")
+                            .to_string(),
+                        message: err_obj
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown upstream error")
+                            .to_string(),
+                    }
                 });
                 out.is_done = true;
             }
             "response.completed" => {
+                out.is_done = true;
+            }
+            "response.incomplete" => {
                 out.is_done = true;
             }
             _ => {}
@@ -233,10 +259,47 @@ fn extract_usage(payload: &Value) -> Option<CodexUsage> {
     let usage_obj = payload
         .get("response")
         .and_then(|r| r.get("usage"))
-        .or_else(|| payload.get("usage"))?
-        .clone();
+        .or_else(|| payload.get("usage"))?;
 
-    serde_json::from_value::<CodexUsage>(usage_obj).ok()
+    let input_tokens = usage_obj
+        .get("input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0) as i32;
+    let output_tokens = usage_obj
+        .get("output_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0) as i32;
+
+    let cached_tokens = usage_obj
+        .get("cached_tokens")
+        .and_then(Value::as_i64)
+        .map(|v| v as i32)
+        .or_else(|| {
+            usage_obj
+                .get("input_tokens_details")
+                .and_then(|v| v.get("cached_tokens"))
+                .and_then(Value::as_i64)
+                .map(|v| v as i32)
+        });
+
+    let reasoning_tokens = usage_obj
+        .get("reasoning_tokens")
+        .and_then(Value::as_i64)
+        .map(|v| v as i32)
+        .or_else(|| {
+            usage_obj
+                .get("output_tokens_details")
+                .and_then(|v| v.get("reasoning_tokens"))
+                .and_then(Value::as_i64)
+                .map(|v| v as i32)
+        });
+
+    Some(CodexUsage {
+        input_tokens,
+        output_tokens,
+        cached_tokens,
+        reasoning_tokens,
+    })
 }
 
 #[cfg(test)]
@@ -296,5 +359,47 @@ mod tests {
         });
 
         assert_eq!(event.text_delta.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn extracts_text_from_output_text_done() {
+        let mut extractor = CodexEventExtractor::new();
+        let event = extractor.extract(ParsedSseEvent::Json {
+            event: Some("response.output_text.done".to_string()),
+            payload: json!({
+                "text": "complete"
+            }),
+        });
+
+        assert_eq!(event.text_delta.as_deref(), Some("complete"));
+    }
+
+    #[test]
+    fn extracts_usage_from_nested_details() {
+        let mut extractor = CodexEventExtractor::new();
+        let event = extractor.extract(ParsedSseEvent::Json {
+            event: Some("response.completed".to_string()),
+            payload: json!({
+                "response": {
+                    "id": "resp_1",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 20,
+                        "input_tokens_details": {
+                            "cached_tokens": 3
+                        },
+                        "output_tokens_details": {
+                            "reasoning_tokens": 7
+                        }
+                    }
+                }
+            }),
+        });
+
+        let usage = event.usage.expect("usage");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.cached_tokens, Some(3));
+        assert_eq!(usage.reasoning_tokens, Some(7));
     }
 }
