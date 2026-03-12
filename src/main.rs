@@ -540,20 +540,38 @@ async fn universal_request_handler(
                 "object": "list",
                 "data": [
                     {
-                        "id": "gpt-4",
+                        "id": "gpt-5.4",
                         "object": "model",
                         "created": 1687882411,
                         "owned_by": "openai"
                     },
                     {
-                        "id": "gpt-5",
-                        "object": "model", 
+                        "id": "gpt-5.3-codex",
+                        "object": "model",
                         "created": 1687882411,
                         "owned_by": "openai"
                     },
                     {
-                        "id": "gpt-5.4",
-                        "object": "model", 
+                        "id": "gpt-5.2-codex",
+                        "object": "model",
+                        "created": 1687882411,
+                        "owned_by": "openai"
+                    },
+                    {
+                        "id": "gpt-5.2",
+                        "object": "model",
+                        "created": 1687882411,
+                        "owned_by": "openai"
+                    },
+                    {
+                        "id": "gpt-5.1-codex-max",
+                        "object": "model",
+                        "created": 1687882411,
+                        "owned_by": "openai"
+                    },
+                    {
+                        "id": "gpt-5.1-codex-mini",
+                        "object": "model",
                         "created": 1687882411,
                         "owned_by": "openai"
                     }
@@ -791,20 +809,38 @@ async fn handle_models(
         "object": "list",
         "data": [
             {
-                "id": "gpt-4",
+                "id": "gpt-5.4",
                 "object": "model",
                 "created": 1687882411,
                 "owned_by": "openai"
             },
             {
-                "id": "gpt-5",
-                "object": "model", 
+                "id": "gpt-5.3-codex",
+                "object": "model",
                 "created": 1687882411,
                 "owned_by": "openai"
             },
             {
-                "id": "gpt-5.4",
-                "object": "model", 
+                "id": "gpt-5.2-codex",
+                "object": "model",
+                "created": 1687882411,
+                "owned_by": "openai"
+            },
+            {
+                "id": "gpt-5.2",
+                "object": "model",
+                "created": 1687882411,
+                "owned_by": "openai"
+            },
+            {
+                "id": "gpt-5.1-codex-max",
+                "object": "model",
+                "created": 1687882411,
+                "owned_by": "openai"
+            },
+            {
+                "id": "gpt-5.1-codex-mini",
+                "object": "model",
                 "created": 1687882411,
                 "owned_by": "openai"
             }
