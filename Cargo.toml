@@ -1,5 +1,5 @@
 [package]
-name = "codex-openai-proxy"
+name = "claude-codex-proxy"
 version = "0.1.0"
 edition = "2021"
 

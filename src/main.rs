@@ -21,7 +21,7 @@ struct Args {
 }
 
 /// Chat Completions API format (what CLINE sends)
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct ChatCompletionsRequest {
     model: String,
     messages: Vec<ChatMessage>,
@@ -32,14 +32,14 @@ struct ChatCompletionsRequest {
     tool_choice: Option<Value>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct ChatMessage {
     role: String,
     content: Value, // Can be string or array
 }
 
 /// Chat Completions API response format (what CLINE expects)
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 struct ChatCompletionsResponse {
     id: String,
     object: String,
@@ -49,20 +49,20 @@ struct ChatCompletionsResponse {
     usage: Option<Usage>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 struct Choice {
     index: i32,
     message: ChatResponseMessage,
     finish_reason: Option<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 struct ChatResponseMessage {
     role: String,
     content: String,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 struct Usage {
     prompt_tokens: i32,
     completion_tokens: i32,
@@ -70,7 +70,7 @@ struct Usage {
 }
 
 /// Codex Responses API format (what we send to ChatGPT backend)
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 struct ResponsesApiRequest {
     model: String,
     instructions: String,
@@ -84,7 +84,7 @@ struct ResponsesApiRequest {
     include: Vec<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ResponseItem {
     Message {
@@ -95,10 +95,11 @@ enum ResponseItem {
     },
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ContentItem {
     InputText { text: String },
+    OutputText { text: String },
 }
 
 /// Codex auth.json structure
@@ -136,6 +137,32 @@ struct ResponseContentItem {
     text: Option<String>,
 }
 
+/// Anthropic Messages API response format
+#[derive(Serialize, Debug)]
+struct AnthropicMessagesResponse {
+    id: String,
+    #[serde(rename = "type")]
+    msg_type: String,
+    role: String,
+    model: String,
+    content: Vec<AnthropicContentItem>,
+    stop_reason: String,
+    stop_sequence: Option<String>,
+    usage: AnthropicUsage,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AnthropicContentItem {
+    Text { text: String },
+}
+
+#[derive(Serialize, Debug)]
+struct AnthropicUsage {
+    input_tokens: i32,
+    output_tokens: i32,
+}
+
 struct ProxyServer {
     client: Client,
     auth_data: AuthData,
@@ -170,15 +197,14 @@ impl ProxyServer {
     }
 
     fn convert_chat_to_responses(&self, chat_req: ChatCompletionsRequest) -> ResponsesApiRequest {
-        // Convert messages to ResponseItems
         let mut input = Vec::new();
+        let mut system_instructions = Vec::new();
         
         for msg in chat_req.messages {
             // Convert content to string (handle both string and array formats)
             let content_text = match &msg.content {
                 Value::String(s) => s.clone(),
                 Value::Array(arr) => {
-                    // Extract text from array elements
                     arr.iter()
                         .filter_map(|v| {
                             if let Some(obj) = v.as_object() {
@@ -193,24 +219,44 @@ impl ProxyServer {
                 _ => msg.content.to_string(),
             };
             
-            input.push(ResponseItem::Message {
-                id: None,
-                role: msg.role,
-                content: vec![ContentItem::InputText {
-                    text: content_text,
-                }],
-            });
+            match msg.role.as_str() {
+                "system" => {
+                    // System messages go into instructions
+                    system_instructions.push(content_text);
+                },
+                "user" => {
+                    input.push(ResponseItem::Message {
+                        id: None,
+                        role: "user".to_string(),
+                        content: vec![ContentItem::InputText { text: content_text }],
+                    });
+                },
+                "assistant" => {
+                    input.push(ResponseItem::Message {
+                        id: None,
+                        role: "assistant".to_string(),
+                        content: vec![ContentItem::OutputText { text: content_text }],
+                    });
+                },
+                // Skip tool_use, tool_result, and other unsupported roles
+                _ => {
+                    println!("⚠️ Skipping unsupported message role: {}", msg.role);
+                }
+            }
         }
 
-        // Use proper instructions for ChatGPT Responses API
-        let instructions = "You are a helpful AI assistant. Provide clear, accurate, and concise responses to user questions and requests.".to_string();
+        let instructions = if system_instructions.is_empty() {
+            "You are a helpful AI assistant. Provide clear, accurate, and concise responses.".to_string()
+        } else {
+            system_instructions.join("\n\n")
+        };
 
         ResponsesApiRequest {
             model: chat_req.model,
             instructions,
             input,
-            tools: chat_req.tools.unwrap_or_default(),
-            tool_choice: "auto".to_string(),
+            tools: vec![],
+            tool_choice: "none".to_string(),
             parallel_tool_calls: false,
             reasoning: None,
             store: false,
@@ -221,35 +267,6 @@ impl ProxyServer {
 
 
     async fn proxy_request(&self, chat_req: ChatCompletionsRequest) -> Result<ChatCompletionsResponse> {
-        // For now, return a working response while we implement backend
-        println!("🔄 Processing CLINE request...");
-        println!("🔍 Stream setting: {:?}", chat_req.stream);
-        
-        let chat_res = ChatCompletionsResponse {
-            id: format!("chatcmpl-{}", Uuid::new_v4()),
-            object: "chat.completion".to_string(),
-            created: chrono::Utc::now().timestamp(),
-            model: chat_req.model.clone(),
-            choices: vec![Choice {
-                index: 0,
-                message: ChatResponseMessage {
-                    role: "assistant".to_string(),
-                    content: "I can help you with coding tasks! The proxy connection is working well. What would you like assistance with? (Note: Currently running in development mode while ChatGPT backend integration is being finalized.)".to_string(),
-                },
-                finish_reason: Some("stop".to_string()),
-            }],
-            usage: Some(Usage {
-                prompt_tokens: 50,
-                completion_tokens: 30,
-                total_tokens: 80,
-            }),
-        };
-        
-        Ok(chat_res)
-    }
-    
-    #[allow(dead_code)]
-    async fn proxy_request_original(&self, chat_req: ChatCompletionsRequest) -> Result<ChatCompletionsResponse> {
         // Convert to Responses API format
         let responses_req = self.convert_chat_to_responses(chat_req);
         
@@ -293,74 +310,43 @@ impl ProxyServer {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            println!("❌ Backend error ({}): {}", status, body);
             
-            // Instead of returning error, create a valid response with error message
-            let error_message = "Hello! I'm responding from the proxy. The backend API isn't working yet but I can receive and respond to your requests.".to_string();
-            
-            let chat_res = ChatCompletionsResponse {
-                id: format!("chatcmpl-{}", Uuid::new_v4()),
-                object: "chat.completion".to_string(),
-                created: chrono::Utc::now().timestamp(),
-                model: responses_req.model.clone(),
-                choices: vec![Choice {
-                    index: 0,
-                    message: ChatResponseMessage {
-                        role: "assistant".to_string(),
-                        content: error_message,
-                    },
-                    finish_reason: Some("stop".to_string()),
-                }],
-                usage: Some(Usage {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    total_tokens: 0,
-                }),
-            };
-            
-            return Ok(chat_res);
+            return Err(anyhow::anyhow!("Backend error: {}", status));
         }
 
-        // Handle streaming response
+        // Parse the response.completed event which contains the full final answer
+        // This is the LAST event in the SSE stream and contains the definitive response
         let mut response_content = String::new();
         let response_text = response.text().await?;
         let lines: Vec<&str> = response_text.lines().collect();
         
         for line in lines {
             if line.starts_with("data: ") {
-                let json_data = &line[6..]; // Remove "data: " prefix
-                if json_data == "[DONE]" {
-                    break;
-                }
+                let json_data = &line[6..];
+                if json_data == "[DONE]" { break; }
                 
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(json_data) {
-                    if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
-                        match event_type {
-                            "response.output_text.delta" => {
-                                if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
-                                    response_content.push_str(delta);
-                                }
-                            }
-                            "response.output_item.done" => {
-                                if let Some(item) = event.get("item") {
-                                    if let Some(content_arr) = item.get("content").and_then(|v| v.as_array()) {
-                                        for content_item in content_arr {
-                                            if let Some(text) = content_item.get("text").and_then(|v| v.as_str()) {
-                                                response_content.push_str(text);
+                    let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    
+                    if event_type == "response.completed" {
+                        // Extract text from the completed response output
+                        if let Some(output) = event.pointer("/response/output") {
+                            if let Some(arr) = output.as_array() {
+                                for item in arr {
+                                    if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                                        for c in content {
+                                            if let Some(text) = c.get("text").and_then(|v| v.as_str()) {
+                                                response_content = text.to_string();
                                             }
                                         }
                                     }
                                 }
                             }
-                            _ => {} // Ignore other event types
                         }
                     }
                 }
             }
-        }
-
-        // If no content was collected, use a default message
-        if response_content.is_empty() {
-            response_content = "I apologize, but I couldn't process your request due to a backend API format issue. The proxy is receiving your request correctly but needs format refinement.".to_string();
         }
 
         // Create Chat Completions response
@@ -386,6 +372,7 @@ impl ProxyServer {
         
         Ok(chat_res)
     }
+
 }
 
 // Enhanced logging function
@@ -490,6 +477,13 @@ async fn main() -> Result<()> {
         .allow_headers(vec!["authorization", "content-type", "accept", "accept-encoding", "x-stainless-arch", "x-stainless-lang", "x-stainless-os", "x-stainless-package-version", "x-stainless-retry-count", "x-stainless-runtime", "x-stainless-runtime-version", "x-stainless-timeout"])
         .allow_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"]);
 
+    let _chat_messages_v1 = warp::path!("v1" / "messages")
+        .and(warp::post())
+        .and(warp::header::headers_cloned())
+        .and(warp::body::json())
+        .and(proxy_filter.clone())
+        .and_then(handle_chat_completions); // Reusing handler as format is similar enough for extraction
+
     // BULLETPROOF SOLUTION - Single universal handler (removed old catch_all)
     let universal_handler = warp::any()
         .and(warp::method())
@@ -508,7 +502,7 @@ async fn main() -> Result<()> {
     println!("   Chat endpoint: http://localhost:{}/v1/chat/completions", args.port);
     println!("\n   Configure CLINE with:");
     println!("   Base URL: http://localhost:{}", args.port);
-    println!("   Model: gpt-5");
+    println!("   Model: gpt-5.4");
     println!("   API Key: (any value)");
 
     warp::serve(routes)
@@ -556,14 +550,20 @@ async fn universal_request_handler(
                         "object": "model", 
                         "created": 1687882411,
                         "owned_by": "openai"
+                    },
+                    {
+                        "id": "gpt-5.4",
+                        "object": "model", 
+                        "created": 1687882411,
+                        "owned_by": "openai"
                     }
                 ]
             });
             
             Ok(warp::reply::json(&models_response).into_response())
         },
-        ("POST", "/chat/completions") | ("POST", "/v1/chat/completions") => {
-            println!("🔥 === MATCHED CHAT COMPLETIONS ===");
+        ("POST", "/chat/completions") | ("POST", "/v1/chat/completions") | ("POST", "/v1/messages") | ("POST", "/messages") => {
+            println!("🔥 === MATCHED CHAT/MESSAGES REQUEST ===");
             
             // LOG EXACT CLINE REQUEST FOR CURL REPLICATION
             println!("\n📋 === CLINE REQUEST DETAILS FOR CURL ===");
@@ -615,7 +615,7 @@ async fn universal_request_handler(
             println!("📋 === END CLINE REQUEST DETAILS ===\n");
             
             // Parse JSON from bytes
-            let chat_req: ChatCompletionsRequest = match serde_json::from_slice(&body) {
+            let mut chat_req: ChatCompletionsRequest = match serde_json::from_slice(&body) {
                 Ok(req) => req,
                 Err(e) => {
                     println!("❌ JSON parse error: {}", e);
@@ -625,6 +625,43 @@ async fn universal_request_handler(
                     ).into_response());
                 }
             };
+            
+            let is_anthropic = path_str.contains("/messages");
+            
+            // Fix Anthropic tool formats
+            if is_anthropic {
+                if let Some(tools) = &mut chat_req.tools {
+                    for tool in tools.iter_mut() {
+                        if let Some(obj) = tool.as_object_mut() {
+                            if obj.contains_key("input_schema") && !obj.contains_key("type") {
+                                let name = obj.remove("name").unwrap_or(json!(""));
+                                let description = obj.remove("description").unwrap_or(json!(""));
+                                let parameters = obj.remove("input_schema").unwrap_or(json!({}));
+                                
+                                *tool = json!({
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "description": description,
+                                        "parameters": parameters
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+                
+                // Fix tool_choice if it's sent as an object
+                if let Some(tc) = &chat_req.tool_choice {
+                    if let Some(obj) = tc.as_object() {
+                        if let Some(t) = obj.get("type").and_then(|v| v.as_str()) {
+                            if t == "auto" {
+                                chat_req.tool_choice = Some(json!("auto"));
+                            }
+                        }
+                    }
+                }
+            }
             
             println!("   Model: {}", chat_req.model);
             println!("   Messages: {} items", chat_req.messages.len());
@@ -639,43 +676,81 @@ async fn universal_request_handler(
             println!("🔥 === END MATCHED ===\n");
             
             // Check if streaming is requested
+            
             if chat_req.stream.unwrap_or(false) {
-                println!("🔄 STREAMING: CLINE requested streaming response, implementing SSE format");
+                println!("🔄 STREAMING: Processing real backend request for {:?} format", if is_anthropic { "Anthropic" } else { "OpenAI" });
                 
-                // Generate contextual response based on user messages
-                let message = improved_response::generate_contextual_response(&chat_req.messages);
-                println!("📝 Generated contextual response: {}", &message[..std::cmp::min(100, message.len())]);
-                
-                let chunk_id = "chatcmpl-streaming-12345";
-                let model = chat_req.model.clone();
-                
-                let sse_chunks = vec![
-                    // First chunk with role
-                    format!("data: {{\"id\":\"{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\"}},\"finish_reason\":null}}]}}\n\n", 
-                            chunk_id, chrono::Utc::now().timestamp(), model),
-                    // Content chunk
-                    format!("data: {{\"id\":\"{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n", 
-                            chunk_id, chrono::Utc::now().timestamp(), model, message),
-                    // Final chunk
-                    format!("data: {{\"id\":\"{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n", 
-                            chunk_id, chrono::Utc::now().timestamp(), model),
-                    // End marker
-                    "data: [DONE]\n\n".to_string(),
-                ];
-                
-                let sse_response = sse_chunks.join("");
-                let reply = warp::reply::with_header(sse_response, "content-type", "text/event-stream");
-                let reply = warp::reply::with_header(reply, "cache-control", "no-cache");
-                let reply = warp::reply::with_header(reply, "connection", "keep-alive");
-                let reply = warp::reply::with_header(reply, "access-control-allow-origin", "*");
-                Ok(reply.into_response())
+                // For now, get the full response and stream it as a single block to ensure accuracy
+                match proxy.proxy_request(chat_req.clone()).await {
+                    Ok(response) => {
+                        let message = response.choices[0].message.content.clone();
+                        let chunk_id = if is_anthropic { format!("msg_{}", Uuid::new_v4()) } else { format!("chatcmpl-{}", Uuid::new_v4()) };
+                        let model = chat_req.model.clone();
+                        
+                        let sse_response = if is_anthropic {
+                            // Anthropic format SSE
+                            vec![
+                                format!("event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"id\":\"{}\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"{}\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{{\"input_tokens\":50,\"output_tokens\":1}}}}}}\n\n", chunk_id, model),
+                                format!("event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n"),
+                                format!("event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{}\"}}}}\n\n", message),
+                                format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n"),
+                                format!("event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\",\"stop_sequence\":null}},\"usage\":{{\"output_tokens\":30}}}}\n\n"),
+                                format!("event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"),
+                            ].join("")
+                        } else {
+                            // OpenAI format SSE
+                            vec![
+                                format!("data: {{\"id\":\"{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\"}},\"finish_reason\":null}}]}}\n\n", 
+                                        chunk_id, chrono::Utc::now().timestamp(), model),
+                                format!("data: {{\"id\":\"{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n", 
+                                        chunk_id, chrono::Utc::now().timestamp(), model, message),
+                                format!("data: {{\"id\":\"{}\",\"object\":\"chat.completion.chunk\",\"created\":{},\"model\":\"{}\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n", 
+                                        chunk_id, chrono::Utc::now().timestamp(), model),
+                                "data: [DONE]\n\n".to_string(),
+                            ].join("")
+                        };
+                        
+                        let reply = warp::reply::with_header(sse_response, "content-type", "text/event-stream");
+                        let reply = warp::reply::with_header(reply, "cache-control", "no-cache");
+                        let reply = warp::reply::with_header(reply, "connection", "keep-alive");
+                        let reply = warp::reply::with_header(reply, "access-control-allow-origin", "*");
+                        Ok(reply.into_response())
+                    },
+                    Err(e) => {
+                        eprintln!("Streaming proxy error: {:#}", e);
+                        Ok(warp::reply::with_status("Backend error", warp::http::StatusCode::INTERNAL_SERVER_ERROR).into_response())
+                    }
+                }
             } else {
                 match proxy.proxy_request(chat_req).await {
                     Ok(response) => {
-                        let reply = warp::reply::json(&response);
-                        let reply = warp::reply::with_header(reply, "content-type", "application/json");
-                        let reply = warp::reply::with_header(reply, "access-control-allow-origin", "*");
-                        Ok(reply.into_response())
+                        if is_anthropic {
+                            // Convert OpenAI response to Anthropic response
+                            let anthropic_res = AnthropicMessagesResponse {
+                                id: response.id,
+                                msg_type: "message".to_string(),
+                                role: "assistant".to_string(),
+                                model: response.model,
+                                content: vec![AnthropicContentItem::Text { 
+                                    text: response.choices[0].message.content.clone() 
+                                }],
+                                stop_reason: "end_turn".to_string(),
+                                stop_sequence: None,
+                                usage: AnthropicUsage {
+                                    input_tokens: response.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
+                                    output_tokens: response.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                                },
+                            };
+                            let reply = warp::reply::json(&anthropic_res);
+                            let reply = warp::reply::with_header(reply, "content-type", "application/json");
+                            let reply = warp::reply::with_header(reply, "access-control-allow-origin", "*");
+                            Ok(reply.into_response())
+                        } else {
+                            let reply = warp::reply::json(&response);
+                            let reply = warp::reply::with_header(reply, "content-type", "application/json");
+                            let reply = warp::reply::with_header(reply, "access-control-allow-origin", "*");
+                            Ok(reply.into_response())
+                        }
                     },
                     Err(e) => {
                         eprintln!("Proxy error: {:#}", e);
@@ -723,6 +798,12 @@ async fn handle_models(
             },
             {
                 "id": "gpt-5",
+                "object": "model", 
+                "created": 1687882411,
+                "owned_by": "openai"
+            },
+            {
+                "id": "gpt-5.4",
                 "object": "model", 
                 "created": 1687882411,
                 "owned_by": "openai"
