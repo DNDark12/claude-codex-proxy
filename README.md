@@ -1,147 +1,66 @@
-# Claude Codex Proxy
+# claude-codex-proxy
 
-Proxy Rust để bridge client kiểu **Anthropic Messages** hoặc **OpenAI Chat Completions** sang backend **ChatGPT Codex Responses API**.
+A lightweight Rust proxy that bridges **Anthropic Messages** and **OpenAI Chat Completions** clients to the backend **ChatGPT Codex Responses API**.
 
-Mục tiêu chính của project hiện tại:
-- Giữ **protocol fidelity** cho stream/non-stream.
-- Giữ đầy đủ vòng **tool-calling**.
-- Tránh phát `tool_use` malformed (nguồn gây `Invalid tool parameters`).
+## Key Features
 
-## Kiến trúc
+- **Protocol Fidelity**: Fully supports both streaming and non-streaming responses.
+- **Tool-Calling Support**: Maintains the complete tool-calling lifecycle seamlessly.
+- **Malformed Tool Protection**: Automatically validates and filters out malformed `tool_use` parameters, preventing common "Invalid tool parameters" errors in Claude and OpenAI clients.
+- **High Performance**: Built with Rust for speed, safety, and minimal resource usage.
 
-Code được tách theo 4 lớp:
+## Prerequisites
 
-- `src/routes/`
-  - Nhận request theo protocol (`/v1/messages`, `/v1/chat/completions`), validate JSON, map lỗi đúng schema theo protocol.
-- `src/translation/`
-  - Inbound mapping: Anthropic/OpenAI -> Codex request.
-  - Outbound mapping: Codex SSE -> Anthropic/OpenAI stream + non-stream payload.
-  - `tool_runtime.rs`: Tool registry, assembler, validation JSON/schema, protocol debug.
-- `src/proxy/`
-  - HTTP client gọi upstream Codex backend.
-  - SSE parser theo block (`\n\n`) + event extractor typed.
-- `src/domain/`
-  - Kiểu dữ liệu cho Anthropic/OpenAI/Codex/Auth.
-
-## Luồng xử lý
-
-1. Client gọi `POST /v1/messages` hoặc `POST /v1/chat/completions`.
-2. Route parse request, tạo `ToolRegistry` từ tools gốc của client.
-3. Translator map request sang Codex Responses API.
-4. Proxy gọi `https://chatgpt.com/backend-api/codex/responses` (stream nội bộ luôn bật).
-5. Event extractor tách text/tool delta/done/usage/error.
-6. Outbound translator dựng lại stream/payload theo đúng protocol client.
-
-## Cơ chế chống `Invalid tool parameters`
-
-Project dùng `ToolCallAssembler` để lắp call theo `call_id` và chỉ emit tool khi hợp lệ:
-
-- Ưu tiên parse từ `delta_buffer`.
-- Nếu delta lỗi JSON thì fallback sang `done.arguments`.
-- Validate theo schema tool gốc từ request (`ToolRegistry`).
-- Nếu fail JSON/schema hoặc không map được schema:
-  - **Không emit `tool_use` malformed**.
-  - Emit text diagnostic ngắn có `trace` để debug.
-
-Kết quả:
-- Claude/OpenAI client không bị văng lỗi ngay do tool call sai định dạng.
-- Debug được root cause ở log nếu bật protocol debug.
-
-## Streaming contract
-
-### Anthropic
-- Emit theo chuỗi:
-  - `message_start`
-  - `content_block_start/delta/stop`
-  - `message_delta`
-  - `message_stop`
-- `stop_reason`:
-  - `tool_use` nếu có >=1 tool_use hợp lệ.
-  - `end_turn` nếu không có tool_use hợp lệ.
-- Có recovery khi upstream kết thúc thiếu marker (`force finalize`).
-
-### OpenAI
-- Chunk đầu có `role=assistant`.
-- Tool chunks phát qua `delta.tool_calls`.
-- Chunk cuối có `finish_reason`.
-- Luôn có `[DONE]`.
-
-## Yêu cầu
-
-- Rust stable + Cargo.
-- File auth Codex hợp lệ (mặc định `~/.codex/auth.json`).
+- [Rust stable](https://rustup.rs/) and Cargo.
+- A valid Codex authentication file (defaults to `~/.codex/auth.json`).
 
 ## Quick Start
 
-```bash
-git clone <repo-url>
-cd codex-openai-proxy
-cargo build --release
-./target/release/claude-codex-proxy --port 8080 --auth-path ~/.codex/auth.json
-```
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/DNDark12/claude-codex-proxy.git
+   cd claude-codex-proxy
+   ```
 
-Health check:
+2. **Build the project:**
+   ```bash
+   cargo build --release
+   ```
 
-```bash
-curl -s http://127.0.0.1:8080/health
-```
+3. **Run the proxy:**
+   ```bash
+   ./target/release/claude-codex-proxy --port 8080 --auth-path ~/.codex/auth.json
+   ```
 
-## Cấu hình bằng `.env`
+4. **Verify it's running:**
+   ```bash
+   curl -s http://127.0.0.1:8080/health
+   ```
 
-Binary **tự động load `.env`** (nếu file tồn tại) khi startup.
+## Configuration
 
-Thứ tự ưu tiên config:
-- CLI args (`--port`, `--auth-path`)
-- ENV (`PROXY_PORT`, `PROXY_AUTH_PATH`)
-- Default (`8080`, `~/.codex/auth.json`)
+The proxy automatically loads environment variables from a `.env` file if it exists.
 
-1. Tạo file env:
+1. **Create the environment file:**
+   ```bash
+   cp .env.example .env
+   ```
 
-```bash
-cp .env.example .env
-```
+2. **Adjust the variables** in `.env` as needed. You can then run the app directly using:
+   ```bash
+   cargo run --release
+   ```
 
-2. Chỉnh các biến cần thiết trong `.env`.
+### Important Environment Variables
 
-3. Chạy trực tiếp binary/app:
+- `PROXY_PORT`: The local port for the proxy to listen on (default: `8080`).
+- `PROXY_AUTH_PATH`: Absolute path to your `auth.json` (default: `~/.codex/auth.json`).
+- `RUST_LOG`: Application log level (e.g., `info`, `debug`).
+- `DISABLE_TOOL_FALLBACK`: Set to `true/1` to disable the tool-stripping retry logic.
 
-```bash
-cargo run --release
-```
+## Usage with Claude Clients
 
-Hoặc vẫn có thể chạy script helper nếu muốn:
-
-```bash
-./scripts/run-with-env.sh
-```
-
-### Biến môi trường hỗ trợ
-
-- `PROXY_PORT`
-  - Port chạy local proxy (dùng trong script).
-- `PROXY_AUTH_PATH`
-  - Path tới `auth.json` (dùng trong script).
-- `RUST_LOG`
-  - Mức log app (`info`, `debug`, ...).
-- `LOG_PROTOCOL_DEBUG`
-  - `true/1`: bật log protocol debug (đã scrub).
-- `DISABLE_TOOL_FALLBACK`
-  - `true/1`: tắt retry strip-tools.
-  - `false/0`: cho retry 1 lần chỉ khi upstream báo tools unsupported và tool_choice không bắt buộc.
-
-## Endpoint công khai
-
-- `GET /health`
-- `GET /models`
-- `GET /v1/models`
-- `POST /messages`
-- `POST /v1/messages`
-- `POST /chat/completions`
-- `POST /v1/chat/completions`
-
-## Cấu hình Claude CLI/Claude Code
-
-Ví dụ cấu hình trỏ Anthropic base URL về proxy:
+You can expose the proxy as an Anthropic-compatible endpoint. For example, configure your Claude client (such as Claude Code) with:
 
 ```json
 {
@@ -151,32 +70,19 @@ Ví dụ cấu hình trỏ Anthropic base URL về proxy:
 }
 ```
 
-Lưu ý: model thực tế phụ thuộc capability backend tại thời điểm chạy. Dùng `GET /v1/models` để xem danh sách hiện tại.
+*Note: Actual model support depends on the backend capabilities at runtime. Use `GET /v1/models` to see the currently available models.*
 
-## Debug nhanh
+## Available Endpoints
 
-Bật protocol debug:
+- `GET /health`
+- `GET /models`
+- `GET /v1/models`
+- `POST /messages`
+- `POST /v1/messages`
+- `POST /chat/completions`
+- `POST /v1/chat/completions`
 
-```bash
-LOG_PROTOCOL_DEBUG=true RUST_LOG=info cargo run --release
-```
+## Security Notes
 
-Khi đó log sẽ có các trường:
-- `trace_id`, `request_id`, `response_id`
-- `call_id`, `tool_name`, `source(delta/done)`
-- `json_valid`, `schema_valid`, `emit`, `reason`
-
-Không dump raw token/prompt/tool args để tránh lộ dữ liệu nhạy cảm.
-
-## Dev
-
-```bash
-cargo fmt
-cargo test
-cargo clippy
-```
-
-## Ghi chú bảo mật
-
-- Không commit `.env` và `auth.json`.
-- Chỉ dùng `auth.json` từ máy bạn, không chia sẻ token.
+- **Never** commit your `.env` or `auth.json` files to version control.
+- Ensure your `auth.json` file is kept secure locally; never share your authentication tokens.
