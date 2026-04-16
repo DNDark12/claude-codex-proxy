@@ -9,6 +9,7 @@ use crate::domain::anthropic::{AnthropicError, AnthropicErrorBody, AnthropicMess
 use crate::domain::codex::{CodexResponsesRequest, CodexToolChoice};
 use crate::domain::openai::ChatCompletionsRequest;
 use crate::proxy::codex_client::{CodexClient, UpstreamError};
+use crate::skills::{prepare_anthropic_request, SkillRegistry};
 use crate::translation::anthropic_to_codex::translate_anthropic_to_codex;
 use crate::translation::codex_to_anthropic::{
     collect_codex_to_anthropic, stream_codex_to_anthropic,
@@ -20,13 +21,16 @@ use crate::translation::tool_runtime::ToolRegistry;
 #[derive(Clone)]
 struct AppState {
     client: Arc<CodexClient>,
+    skill_registry: Option<Arc<SkillRegistry>>,
 }
 
 pub fn build_routes(
     client: CodexClient,
+    skill_registry: Option<SkillRegistry>,
 ) -> impl Filter<Extract = impl Reply, Error = warp::Rejection> + Clone {
     let state = AppState {
         client: Arc::new(client),
+        skill_registry: skill_registry.map(Arc::new),
     };
     let state_filter = warp::any().map(move || state.clone());
 
@@ -249,8 +253,40 @@ async fn handle_anthropic_messages(
         &headers,
     );
 
-    let tool_registry = ToolRegistry::from_anthropic_request(&request);
-    let codex_request = translate_anthropic_to_codex(&request);
+    let prepared_request = prepare_anthropic_request(
+        &request,
+        state.skill_registry.as_ref().map(Arc::as_ref),
+        &trace_id,
+    );
+    match (
+        &prepared_request.requested_marker,
+        prepared_request.bridge.as_ref(),
+    ) {
+        (Some(_marker), Some(bridge)) => {
+            log::info!(
+                "[{trace_id}] resolved skill marker={} skill={} version={} tool_aliases={} references={}",
+                bridge.marker,
+                bridge.id,
+                bridge.version,
+                bridge.tool_aliases.len(),
+                bridge.references.len()
+            );
+        }
+        (Some(marker), None) => {
+            log::warn!("[{trace_id}] unresolved skill marker={marker}; continuing without bridge");
+        }
+        (None, _) => {}
+    }
+
+    let tool_registry = ToolRegistry::from_anthropic_request(
+        &prepared_request.request,
+        prepared_request
+            .bridge
+            .as_ref()
+            .map(|bridge| &bridge.tool_aliases),
+    );
+    let codex_request =
+        translate_anthropic_to_codex(&prepared_request.request, prepared_request.bridge.as_ref());
     let has_tools = codex_request
         .tools
         .as_ref()
@@ -287,15 +323,27 @@ async fn handle_anthropic_messages(
         }
     };
 
-    if request.stream.unwrap_or(false) {
-        let stream = stream_codex_to_anthropic(response, request.model, trace_id, tool_registry);
+    if prepared_request.request.stream.unwrap_or(false) {
+        let stream = stream_codex_to_anthropic(
+            response,
+            prepared_request.request.model.clone(),
+            trace_id,
+            tool_registry,
+        );
         let sse = warp::sse::reply(warp::sse::keep_alive().stream(stream));
         let sse = warp::reply::with_header(sse, "cache-control", "no-cache");
         let sse = warp::reply::with_header(sse, "x-accel-buffering", "no");
         return Ok(sse.into_response());
     }
 
-    match collect_codex_to_anthropic(response, request.model, &trace_id, tool_registry).await {
+    match collect_codex_to_anthropic(
+        response,
+        prepared_request.request.model.clone(),
+        &trace_id,
+        tool_registry,
+    )
+    .await
+    {
         Ok(payload) => Ok(warp::reply::json(&payload).into_response()),
         Err(e) => {
             log::warn!("[{trace_id}] collect error: {e}");
@@ -441,7 +489,11 @@ fn tool_fallback_disabled() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::domain::anthropic::{AnthropicContent, AnthropicMessage, AnthropicSystem};
+    use crate::skills::load_skill_registry;
 
     #[test]
     fn detects_required_tool_choice() {
@@ -457,5 +509,34 @@ mod tests {
         assert!(!tool_choice_requires_tool(Some(
             &CodexToolChoice::Strategy("auto".to_string(),)
         )));
+    }
+
+    #[test]
+    fn prepares_anthropic_request_with_skill_bridge_fixture() {
+        let registry = load_skill_registry(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/skill_bridge/registry.json"),
+        )
+        .expect("registry");
+        let request = AnthropicMessagesRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("review these changes".to_string()),
+            }],
+            system: Some(AnthropicSystem::Text(
+                "skill-bridge:code-review@1.0.0".to_string(),
+            )),
+            tools: None,
+            tool_choice: None,
+            stream: Some(false),
+            thinking: None,
+        };
+
+        let prepared =
+            prepare_anthropic_request(&request, Some(&registry), "test-resolve-anthropic");
+
+        assert!(prepared.bridge.is_some());
+        assert!(prepared.request.system.is_none());
     }
 }

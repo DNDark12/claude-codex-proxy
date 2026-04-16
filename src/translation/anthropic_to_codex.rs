@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 use crate::domain::anthropic::{
@@ -6,9 +8,13 @@ use crate::domain::anthropic::{
 use crate::domain::codex::{
     CodexContentPart, CodexInputItem, CodexMessageContent, CodexResponsesRequest,
 };
+use crate::skills::{ReferencePayload, ResolvedSkillContext, SkillMergeMode};
 use crate::translation::tool_format::{anthropic_tool_choice_to_codex, anthropic_tools_to_codex};
 
-pub fn translate_anthropic_to_codex(req: &AnthropicMessagesRequest) -> CodexResponsesRequest {
+pub fn translate_anthropic_to_codex(
+    req: &AnthropicMessagesRequest,
+    bridge: Option<&ResolvedSkillContext>,
+) -> CodexResponsesRequest {
     let mut input: Vec<CodexInputItem> = Vec::new();
 
     for message in &req.messages {
@@ -20,7 +26,11 @@ pub fn translate_anthropic_to_codex(req: &AnthropicMessagesRequest) -> CodexResp
                 });
             }
             AnthropicContent::Blocks(blocks) => {
-                input.extend(convert_blocks_to_input_items(&message.role, blocks));
+                input.extend(convert_blocks_to_input_items(
+                    &message.role,
+                    blocks,
+                    bridge.map(|bridge| &bridge.tool_aliases),
+                ));
             }
         }
     }
@@ -35,17 +45,17 @@ pub fn translate_anthropic_to_codex(req: &AnthropicMessagesRequest) -> CodexResp
     let tools = req
         .tools
         .as_ref()
-        .map(|v| anthropic_tools_to_codex(v))
+        .map(|v| anthropic_tools_to_codex(v, bridge.map(|bridge| &bridge.tool_aliases)))
         .filter(|v| !v.is_empty());
 
     let tool_choice = req
         .tool_choice
         .as_ref()
-        .and_then(anthropic_tool_choice_to_codex);
+        .and_then(|choice| anthropic_tool_choice_to_codex(choice, bridge.map(|v| &v.tool_aliases)));
 
     CodexResponsesRequest {
         model: req.model.clone(),
-        instructions: build_instructions(req),
+        instructions: build_instructions(req, bridge),
         input,
         tools,
         tool_choice,
@@ -59,6 +69,7 @@ pub fn translate_anthropic_to_codex(req: &AnthropicMessagesRequest) -> CodexResp
 fn convert_blocks_to_input_items(
     role: &str,
     blocks: &[AnthropicContentBlock],
+    aliases: Option<&HashMap<String, String>>,
 ) -> Vec<CodexInputItem> {
     let mut out = Vec::new();
 
@@ -126,7 +137,7 @@ fn convert_blocks_to_input_items(
                 out.push(CodexInputItem::FunctionCall {
                     item_type: "function_call".to_string(),
                     call_id: id.clone(),
-                    name: name.clone(),
+                    name: apply_tool_alias(name, aliases),
                     arguments: serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string()),
                 });
             }
@@ -154,6 +165,23 @@ fn convert_blocks_to_input_items(
     out
 }
 
+fn apply_tool_alias(name: &str, aliases: Option<&HashMap<String, String>>) -> String {
+    let Some(aliases) = aliases else {
+        return name.to_string();
+    };
+
+    aliases
+        .get(name)
+        .cloned()
+        .or_else(|| {
+            aliases
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+        })
+        .unwrap_or_else(|| name.to_string())
+}
+
 fn anthropic_result_to_text(content: &Value) -> String {
     match content {
         Value::String(v) => v.clone(),
@@ -174,7 +202,28 @@ fn anthropic_result_to_text(content: &Value) -> String {
     }
 }
 
-fn build_instructions(req: &AnthropicMessagesRequest) -> String {
+fn build_instructions(
+    req: &AnthropicMessagesRequest,
+    bridge: Option<&ResolvedSkillContext>,
+) -> String {
+    let base = build_base_instructions(req, bridge.is_none());
+    let Some(bridge) = bridge else {
+        return base;
+    };
+
+    let mut bridge_instruction = bridge.codex_instructions.trim().to_string();
+    let reference_block = render_reference_block(&bridge.references);
+    if !reference_block.is_empty() {
+        if !bridge_instruction.is_empty() {
+            bridge_instruction.push_str("\n\n");
+        }
+        bridge_instruction.push_str(&reference_block);
+    }
+
+    merge_instructions(&bridge_instruction, base, bridge.merge_mode)
+}
+
+fn build_base_instructions(req: &AnthropicMessagesRequest, include_default: bool) -> String {
     if let Some(system) = &req.system {
         match system {
             AnthropicSystem::Text(text) => return text.clone(),
@@ -210,10 +259,66 @@ fn build_instructions(req: &AnthropicMessagesRequest) -> String {
         .join("\n\n");
 
     if message_systems.is_empty() {
-        "You are a helpful assistant.".to_string()
+        if include_default {
+            "You are a helpful assistant.".to_string()
+        } else {
+            String::new()
+        }
     } else {
         message_systems
     }
+}
+
+fn merge_instructions(prefix: &str, base: String, merge_mode: SkillMergeMode) -> String {
+    let prefix = prefix.trim();
+    let base = base.trim().to_string();
+
+    if prefix.is_empty() {
+        return base;
+    }
+
+    match merge_mode {
+        SkillMergeMode::Replace => prefix.to_string(),
+        SkillMergeMode::Append => {
+            if base.is_empty() {
+                prefix.to_string()
+            } else {
+                format!("{base}\n\n{prefix}")
+            }
+        }
+        SkillMergeMode::Prepend => {
+            if base.is_empty() {
+                prefix.to_string()
+            } else {
+                format!("{prefix}\n\n{base}")
+            }
+        }
+    }
+}
+
+fn render_reference_block(references: &[ReferencePayload]) -> String {
+    if references.is_empty() {
+        return String::new();
+    }
+
+    let rendered = references
+        .iter()
+        .filter_map(|reference| {
+            let content = reference.content.trim();
+            if content.is_empty() {
+                return None;
+            }
+
+            Some(format!(
+                "## Skill Reference: {}\n\n{}",
+                reference.path.trim(),
+                content
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    rendered.trim().to_string()
 }
 
 fn map_thinking_to_reasoning(thinking: &Value) -> Option<Value> {
@@ -264,7 +369,7 @@ mod tests {
             thinking: None,
         };
 
-        let out = translate_anthropic_to_codex(&req);
+        let out = translate_anthropic_to_codex(&req, None);
         assert_eq!(out.instructions, "RULE");
     }
 
@@ -297,7 +402,7 @@ mod tests {
             thinking: None,
         };
 
-        let out = translate_anthropic_to_codex(&req);
+        let out = translate_anthropic_to_codex(&req, None);
         assert!(out
             .input
             .iter()
@@ -326,9 +431,78 @@ mod tests {
             thinking: None,
         };
 
-        let out = translate_anthropic_to_codex(&req);
+        let out = translate_anthropic_to_codex(&req, None);
         assert!(
             matches!(out.tool_choice, Some(crate::domain::codex::CodexToolChoice::Strategy(v)) if v == "required")
         );
+    }
+
+    #[test]
+    fn prepends_bridge_instructions_without_default_prompt() {
+        let req = AnthropicMessagesRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("review".to_string()),
+            }],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: Some(false),
+            thinking: None,
+        };
+        let bridge = ResolvedSkillContext {
+            id: "code-review".to_string(),
+            version: "1.0.0".to_string(),
+            marker: "skill-bridge:code-review@1.0.0".to_string(),
+            codex_instructions: "# Review\n\nLook for bugs.".to_string(),
+            references: vec![ReferencePayload {
+                path: "references/review-rubric.md".to_string(),
+                content: "Check correctness first.".to_string(),
+            }],
+            merge_mode: SkillMergeMode::Prepend,
+            tool_aliases: Default::default(),
+        };
+
+        let out = translate_anthropic_to_codex(&req, Some(&bridge));
+        assert_eq!(
+            out.instructions,
+            "# Review\n\nLook for bugs.\n\n## Skill Reference: references/review-rubric.md\n\nCheck correctness first."
+        );
+    }
+
+    #[test]
+    fn aliases_anthropic_tool_use_names_before_forwarding() {
+        let req = AnthropicMessagesRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "assistant".to_string(),
+                content: AnthropicContent::Blocks(vec![AnthropicContentBlock::ToolUse {
+                    id: "toolu_1".to_string(),
+                    name: "ReadFile".to_string(),
+                    input: json!({"path":"README.md"}),
+                }]),
+            }],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: Some(false),
+            thinking: None,
+        };
+        let bridge = ResolvedSkillContext {
+            id: "code-review".to_string(),
+            version: "1.0.0".to_string(),
+            marker: "skill-bridge:code-review@1.0.0".to_string(),
+            codex_instructions: "# Review".to_string(),
+            references: vec![],
+            merge_mode: SkillMergeMode::Prepend,
+            tool_aliases: HashMap::from([("ReadFile".to_string(), "read_file".to_string())]),
+        };
+
+        let out = translate_anthropic_to_codex(&req, Some(&bridge));
+        assert!(out.input.iter().any(|item| matches!(
+            item,
+            CodexInputItem::FunctionCall { name, .. } if name == "read_file"
+        )));
     }
 }

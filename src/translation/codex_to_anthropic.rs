@@ -259,7 +259,7 @@ pub async fn collect_codex_to_anthropic(
         if decision.emit {
             emitted_calls.push((
                 decision.call_id,
-                decision.tool_name,
+                decision.display_tool_name,
                 decision.input_value.unwrap_or_else(|| json!({})),
             ));
             continue;
@@ -329,7 +329,7 @@ fn materialize_tool_decision(
         events.push(start_tool_block(
             *content_index,
             &decision.call_id,
-            &decision.tool_name,
+            &decision.display_tool_name,
         ));
         events.push(event(
             "content_block_delta",
@@ -361,7 +361,7 @@ fn tool_skip_diagnostic_text(decision: &ToolCallDecision, trace_id: &str) -> Str
     let short_trace = &trace_id[..trace_id.len().min(8)];
     format!(
         "[Tool skipped: invalid parameters for {} (trace={short_trace})]",
-        decision.tool_name
+        decision.display_tool_name
     )
 }
 

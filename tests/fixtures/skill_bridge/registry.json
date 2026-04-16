@@ -1,0 +1,18 @@
+{
+  "version": "1",
+  "skills": [
+    {
+      "id": "code-review",
+      "version": "1.0.0",
+      "marker": "skill-bridge:code-review@1.0.0",
+      "codex_artifact_path": "code-review/SKILL.md",
+      "reference_bundle_path": "code-review/references.json",
+      "merge_mode": "prepend",
+      "tool_aliases": {},
+      "compatibility": {
+        "anthropic": true,
+        "codex": true
+      }
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use crate::domain::anthropic::{AnthropicTool, AnthropicToolChoice};
@@ -13,6 +15,23 @@ fn normalize_schema(schema: Value) -> Value {
         return Value::Object(obj);
     }
     schema
+}
+
+fn apply_tool_alias(name: &str, aliases: Option<&HashMap<String, String>>) -> String {
+    let Some(aliases) = aliases else {
+        return name.to_string();
+    };
+
+    aliases
+        .get(name)
+        .cloned()
+        .or_else(|| {
+            aliases
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+        })
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn normalize_tool_strategy(strategy: &str) -> String {
@@ -98,11 +117,14 @@ pub fn openai_tool_choice_to_codex(choice: &Value) -> Option<CodexToolChoice> {
     None
 }
 
-pub fn anthropic_tools_to_codex(tools: &[AnthropicTool]) -> Vec<CodexToolDefinition> {
+pub fn anthropic_tools_to_codex(
+    tools: &[AnthropicTool],
+    aliases: Option<&HashMap<String, String>>,
+) -> Vec<CodexToolDefinition> {
     tools
         .iter()
         .filter_map(|tool| {
-            let name = infer_anthropic_tool_name(tool)?;
+            let name = apply_tool_alias(&infer_anthropic_tool_name(tool)?, aliases);
             Some(CodexToolDefinition {
                 tool_type: "function".to_string(),
                 name,
@@ -113,7 +135,10 @@ pub fn anthropic_tools_to_codex(tools: &[AnthropicTool]) -> Vec<CodexToolDefinit
         .collect()
 }
 
-pub fn anthropic_tool_choice_to_codex(choice: &AnthropicToolChoice) -> Option<CodexToolChoice> {
+pub fn anthropic_tool_choice_to_codex(
+    choice: &AnthropicToolChoice,
+    aliases: Option<&HashMap<String, String>>,
+) -> Option<CodexToolChoice> {
     match choice {
         AnthropicToolChoice::Simple(v) => {
             Some(CodexToolChoice::Strategy(normalize_tool_strategy(v)))
@@ -123,7 +148,7 @@ pub fn anthropic_tool_choice_to_codex(choice: &AnthropicToolChoice) -> Option<Co
             "any" => Some(CodexToolChoice::Strategy("required".to_string())),
             "tool" => obj.name.as_ref().map(|name| CodexToolChoice::Function {
                 choice_type: "function".to_string(),
-                name: name.clone(),
+                name: apply_tool_alias(name, aliases),
             }),
             "none" => Some(CodexToolChoice::Strategy("none".to_string())),
             other => Some(CodexToolChoice::Strategy(normalize_tool_strategy(other))),
@@ -147,14 +172,15 @@ mod tests {
             tool_type: Some("text_editor_20250124".to_string()),
         }];
 
-        let out = anthropic_tools_to_codex(&tools);
+        let out = anthropic_tools_to_codex(&tools, None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "text_editor");
     }
 
     #[test]
     fn maps_simple_any_to_required() {
-        let out = anthropic_tool_choice_to_codex(&AnthropicToolChoice::Simple("any".to_string()));
+        let out =
+            anthropic_tool_choice_to_codex(&AnthropicToolChoice::Simple("any".to_string()), None);
         match out {
             Some(CodexToolChoice::Strategy(v)) => assert_eq!(v, "required"),
             _ => panic!("unexpected tool choice"),
@@ -163,12 +189,27 @@ mod tests {
 
     #[test]
     fn maps_object_tool_without_name_to_none() {
-        let out = anthropic_tool_choice_to_codex(&AnthropicToolChoice::Object(
-            AnthropicToolChoiceObject {
+        let out = anthropic_tool_choice_to_codex(
+            &AnthropicToolChoice::Object(AnthropicToolChoiceObject {
                 choice_type: "tool".to_string(),
                 name: None,
-            },
-        ));
+            }),
+            None,
+        );
         assert!(out.is_none());
+    }
+
+    #[test]
+    fn applies_tool_aliases_to_anthropic_tool_names() {
+        let tools = vec![AnthropicTool {
+            name: Some("ReadFile".to_string()),
+            description: Some("file reader".to_string()),
+            input_schema: Some(json!({"type":"object"})),
+            tool_type: None,
+        }];
+        let aliases = HashMap::from([("ReadFile".to_string(), "read_file".to_string())]);
+
+        let out = anthropic_tools_to_codex(&tools, Some(&aliases));
+        assert_eq!(out[0].name, "read_file");
     }
 }

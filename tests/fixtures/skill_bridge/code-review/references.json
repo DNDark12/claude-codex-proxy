@@ -1,0 +1,8 @@
+{
+  "references": [
+    {
+      "path": "references/review-rubric.md",
+      "content": "# Review Rubric\n\nFocus on findings that would matter in a real code review:\n\n- correctness issues that can break behavior\n- regressions introduced by refactors\n- risky assumptions around state, concurrency, and error handling\n- missing tests for changed behavior\n\nPrefer concrete, actionable findings over style feedback."
+    }
+  ]
+}

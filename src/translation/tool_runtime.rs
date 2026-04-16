@@ -9,19 +9,26 @@ use crate::domain::openai::ChatCompletionsRequest;
 pub struct ToolRegistry {
     schemas: HashMap<String, Value>,
     declared_tools: HashSet<String>,
+    display_names: HashMap<String, String>,
     tool_choice_required: bool,
 }
 
 impl ToolRegistry {
-    pub fn from_anthropic_request(req: &AnthropicMessagesRequest) -> Option<Self> {
+    pub fn from_anthropic_request(
+        req: &AnthropicMessagesRequest,
+        aliases: Option<&HashMap<String, String>>,
+    ) -> Option<Self> {
         let mut schemas = HashMap::new();
         let mut declared_tools = HashSet::new();
+        let mut display_names = HashMap::new();
         if let Some(tools) = &req.tools {
             for tool in tools {
                 if let Some(name) = infer_anthropic_tool_name(tool) {
-                    declared_tools.insert(name.clone());
+                    let canonical_name = apply_tool_alias(&name, aliases);
+                    declared_tools.insert(canonical_name.clone());
+                    display_names.insert(canonical_name.clone(), name);
                     if let Some(schema) = tool.input_schema.clone() {
-                        schemas.insert(name, schema);
+                        schemas.insert(canonical_name, schema);
                     }
                 }
             }
@@ -35,6 +42,7 @@ impl ToolRegistry {
         Some(Self {
             schemas,
             declared_tools,
+            display_names,
             tool_choice_required,
         })
     }
@@ -69,6 +77,7 @@ impl ToolRegistry {
         Some(Self {
             schemas,
             declared_tools,
+            display_names: HashMap::new(),
             tool_choice_required,
         })
     }
@@ -127,6 +136,30 @@ impl ToolRegistry {
     pub fn tool_choice_required(&self) -> bool {
         self.tool_choice_required
     }
+
+    pub fn display_name_for(&self, tool_name: &str) -> Option<String> {
+        if let Some(name) = self.display_names.get(tool_name) {
+            return Some(name.clone());
+        }
+
+        if let Some((_, name)) = self
+            .display_names
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(tool_name))
+        {
+            return Some(name.clone());
+        }
+
+        let wanted = canonicalize_tool_name(tool_name);
+        if wanted.is_empty() {
+            return None;
+        }
+
+        self.display_names
+            .iter()
+            .find(|(candidate, _)| canonicalize_tool_name(candidate) == wanted)
+            .map(|(_, display)| display.clone())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +183,7 @@ impl ToolArgumentSource {
 pub struct ToolCallDecision {
     pub call_id: String,
     pub tool_name: String,
+    pub display_tool_name: String,
     pub input_json: String,
     pub input_value: Option<Value>,
     pub source: ToolArgumentSource,
@@ -308,6 +342,11 @@ impl ToolCallAssembler {
         }
 
         let emit = parsed_input.is_some() && schema_valid;
+        let display_tool_name = self
+            .registry
+            .as_ref()
+            .and_then(|registry| registry.display_name_for(&state.tool_name))
+            .unwrap_or_else(|| state.tool_name.clone());
         let input_json = if emit {
             serde_json::to_string(parsed_input.as_ref().expect("input"))
                 .unwrap_or_else(|_| "{}".to_string())
@@ -324,6 +363,7 @@ impl ToolCallAssembler {
         Some(ToolCallDecision {
             call_id: state.call_id.clone(),
             tool_name: state.tool_name.clone(),
+            display_tool_name,
             input_json,
             input_value: parsed_input,
             source,
@@ -333,6 +373,23 @@ impl ToolCallAssembler {
             reason,
         })
     }
+}
+
+fn apply_tool_alias(name: &str, aliases: Option<&HashMap<String, String>>) -> String {
+    let Some(aliases) = aliases else {
+        return name.to_string();
+    };
+
+    aliases
+        .get(name)
+        .cloned()
+        .or_else(|| {
+            aliases
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+        })
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn append_reason(reason: &mut String, value: &str) {
@@ -697,6 +754,7 @@ mod tests {
                 }),
             )]),
             declared_tools: HashSet::from(["read_file".to_string()]),
+            display_names: HashMap::new(),
             tool_choice_required: true,
         }
     }
@@ -828,7 +886,7 @@ mod tests {
             thinking: None,
         };
 
-        let registry = ToolRegistry::from_anthropic_request(&request).expect("registry");
+        let registry = ToolRegistry::from_anthropic_request(&request, None).expect("registry");
         assert!(registry.schema_for("read_file").is_some());
         assert!(registry.tool_choice_required());
     }
@@ -847,7 +905,7 @@ mod tests {
             }],
             stream: Some(true),
             tools: Some(vec![OpenAITool {
-                tool_type: "function".to_string(),
+                _tool_type: "function".to_string(),
                 function: OpenAIToolFunction {
                     name: "read_file".to_string(),
                     description: None,
@@ -888,7 +946,7 @@ mod tests {
             thinking: None,
         };
 
-        let registry = ToolRegistry::from_anthropic_request(&request).expect("registry");
+        let registry = ToolRegistry::from_anthropic_request(&request, None).expect("registry");
         assert!(registry.schema_for("grep").is_some());
         assert!(registry.schema_for("GREP").is_some());
         assert!(registry.schema_for("grep_20250124").is_some());
@@ -930,6 +988,7 @@ mod tests {
                 }),
             )]),
             declared_tools: HashSet::from(["grep".to_string()]),
+            display_names: HashMap::new(),
             tool_choice_required: true,
         };
 
@@ -945,5 +1004,31 @@ mod tests {
         assert!(!result.emit);
         assert!(!result.schema_valid);
         assert!(result.reason.contains("schema_validation_failed"));
+    }
+
+    #[test]
+    fn registry_keeps_display_name_for_aliased_anthropic_tools() {
+        let request = AnthropicMessagesRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![],
+            system: None,
+            tools: Some(vec![AnthropicTool {
+                name: Some("ReadFile".to_string()),
+                description: None,
+                input_schema: Some(json!({"type":"object"})),
+                tool_type: None,
+            }]),
+            tool_choice: Some(AnthropicToolChoice::Simple("any".to_string())),
+            stream: Some(true),
+            thinking: None,
+        };
+        let aliases = HashMap::from([("ReadFile".to_string(), "read_file".to_string())]);
+
+        let registry =
+            ToolRegistry::from_anthropic_request(&request, Some(&aliases)).expect("registry");
+        assert_eq!(
+            registry.display_name_for("read_file").as_deref(),
+            Some("ReadFile")
+        );
     }
 }

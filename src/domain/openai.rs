@@ -60,7 +60,7 @@ pub enum OpenAIImageUrl {
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenAITool {
     #[serde(rename = "type")]
-    pub tool_type: String,
+    pub _tool_type: String,
     pub function: OpenAIToolFunction,
 }
 
@@ -86,7 +86,7 @@ pub struct OpenAIFunction {
 pub struct OpenAIToolCall {
     pub id: String,
     #[serde(rename = "type")]
-    pub call_type: String,
+    pub _call_type: String,
     pub function: OpenAIFunctionCall,
 }
 

@@ -109,7 +109,7 @@ pub struct CodexUsage {
 pub struct FunctionCallStart {
     pub call_id: String,
     pub name: String,
-    pub output_index: usize,
+    pub _output_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -127,7 +127,7 @@ pub struct FunctionCallDone {
 
 #[derive(Debug, Clone)]
 pub struct ExtractedCodexEvent {
-    pub event_type: String,
+    pub _event_type: String,
     pub response_id: Option<String>,
     pub text_delta: Option<String>,
     pub reasoning_delta: Option<String>,
@@ -142,7 +142,7 @@ pub struct ExtractedCodexEvent {
 impl ExtractedCodexEvent {
     pub fn empty(event_type: String) -> Self {
         Self {
-            event_type,
+            _event_type: event_type,
             response_id: None,
             text_delta: None,
             reasoning_delta: None,

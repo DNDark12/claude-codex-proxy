@@ -14,7 +14,8 @@ pub struct AuthData {
 pub struct TokenData {
     pub access_token: String,
     pub account_id: String,
-    pub refresh_token: Option<String>,
+    #[serde(rename = "refresh_token")]
+    pub _refresh_token: Option<String>,
 }
 
 impl AuthData {

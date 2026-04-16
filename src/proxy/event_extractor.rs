@@ -118,7 +118,7 @@ impl CodexEventExtractor {
                         out.function_call_start = Some(FunctionCallStart {
                             call_id,
                             name,
-                            output_index,
+                            _output_index: output_index,
                         });
                     }
                 }

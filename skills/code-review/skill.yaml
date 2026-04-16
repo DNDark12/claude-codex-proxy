@@ -1,0 +1,26 @@
+{
+  "schema_version": "1",
+  "id": "code-review",
+  "version": "1.0.0",
+  "display_name": "Code Review",
+  "description": "Review repository changes for correctness and risk.",
+  "activation": {
+    "marker": "skill-bridge:code-review@1.0.0"
+  },
+  "compatibility": {
+    "claude_code": true,
+    "codex": true
+  },
+  "mapping": {
+    "codex_skill": "code-review",
+    "merge_mode": "prepend"
+  },
+  "artifacts": {
+    "codex_entry": "code-review/SKILL.md",
+    "claude_entry": "claude/code-review"
+  },
+  "references": [
+    "references/review-rubric.md"
+  ],
+  "tool_aliases": {}
+}

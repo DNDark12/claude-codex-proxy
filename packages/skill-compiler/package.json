@@ -1,0 +1,12 @@
+{
+  "name": "@codex-openai-proxy/skill-compiler",
+  "private": true,
+  "type": "module",
+  "description": "Compile canonical skill sources into Claude and Codex artifacts.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

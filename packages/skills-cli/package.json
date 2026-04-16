@@ -1,0 +1,12 @@
+{
+  "name": "@codex-openai-proxy/skills-cli",
+  "private": true,
+  "type": "module",
+  "description": "Project-local installer for Claude to Codex skill bridge artifacts.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

@@ -261,7 +261,7 @@ pub async fn collect_codex_to_openai(
                 id: decision.call_id,
                 call_type: "function".to_string(),
                 function: crate::domain::openai::OpenAIFunctionCall {
-                    name: decision.tool_name,
+                    name: decision.display_tool_name,
                     arguments: decision.input_json,
                 },
             });
@@ -338,7 +338,7 @@ fn materialize_openai_tool_decision(
             created,
             idx,
             &decision.call_id,
-            &decision.tool_name,
+            &decision.display_tool_name,
         );
 
         let args_chunk = OpenAIChunk {
@@ -388,7 +388,7 @@ fn tool_skip_diagnostic_text(decision: &ToolCallDecision, trace_id: &str) -> Str
     let short_trace = &trace_id[..trace_id.len().min(8)];
     format!(
         "[Tool skipped: invalid parameters for {} (trace={short_trace})]",
-        decision.tool_name
+        decision.display_tool_name
     )
 }
 
