@@ -9,11 +9,13 @@ An app-server-first Rust proxy that maps Claude Code surfaces onto Codex runtime
 ## Architecture
 
 ### Three operation modes
+
 - `auto-hybrid` (default): app-server first, Responses API fallback
 - `strict-app-server`: fail without app-server
 - `responses-only`: legacy stateless translation
 
 ### Module layout
+
 - `src/app_server/` — JSON-RPC client, stdio transport, Thread/Turn/Item state, handshake, schema
 - `src/surfaces/` — Surface model, classifier, registry, compatibility matrix
 - `src/jobs/` — JobExecutor (in-process app-server runtime), background job tracking, registry
@@ -28,13 +30,15 @@ An app-server-first Rust proxy that maps Claude Code surfaces onto Codex runtime
 - `src/skills/` — Custom skill bridge (marker detection, instruction injection)
 
 ### Request Flow (app-server mode)
-```
+
+```text
 Client → Warp handler → DispatchPlanner (Surface Classifier)
   → App-server JSON-RPC via JobExecutor (isolated thread/turn handling)
   → Event Translator (ToolCallAssembler) → Claude / OpenAI output
 ```
 
 ### Key Design Decisions
+
 1. App-server-first via stdio JSON-RPC; Responses API = fallback
 2. Surface-first: every Claude surface has bucket (runtime_critical/workflow_runtime/host_admin_ux/platform_specific/out_of_scope) + tier (0-5)
 3. State: BridgeThread > BridgeTurn > BridgeItemRef maps 1:1 to app-server primitives

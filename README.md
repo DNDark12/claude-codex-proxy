@@ -120,7 +120,7 @@ cargo run -- env --shell zsh
 The proxy operates in three modes:
 
 | Mode | Behavior |
-|---|---|
+| --- | --- |
 | `auto-hybrid` | **Default.** App-server first; Responses API fallback for basic chat. |
 | `strict-app-server` | No app-server = fail. All surfaces available. |
 | `responses-only` | Legacy/debug. Stateless Responses API translation only. |
@@ -133,10 +133,26 @@ Spawns `codex app-server` as a child process via stdio JSON-RPC. Manages Thread/
 
 Translates Anthropic/OpenAI requests to Codex Responses API via `chatgpt.com`. Used when app-server is unavailable in `auto-hybrid` mode.
 
+## Task Completion & Thread Leasing (New)
+
+The proxy now includes an in-process **JobExecutor** that bypasses the restrictive rate-limits of the stateless Responses API. It routes supported traffic directly to the underlying `app-server`, ensuring completely unbroken "run-to-completion" semantics for extensive tasks.
+
+The proxy also introduces **Thread Leasing** (Experimental):
+
+- By default, the app-server spawns a *fresh* sandboxed thread for every request to prevent context bleed.
+- **Thread Leasing** allows explicit continuation flows (like updating a task or resuming a session) to "lease" the same execution thread, preserving conversation context and memory footprint.
+- This is disabled by default to maintain safe stateless isolation, but can be enabled via configuration.
+
+To activate, add these to your environment (see Configuration below for more):
+
+```bash
+export CLAUDE_CODEX_PROXY_ENABLE_THREAD_REUSE=true
+```
+
 ## Configuration
 
 | Flag | Env Var | Default | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `--port` | `PROXY_PORT` | `8080` | Listen port |
 | `--auth-path` | `PROXY_AUTH_PATH` | `~/.codex/auth.json` | Auth file (responses-only mode) |
 | `--mode` | — | `auto-hybrid` | Operation mode |
@@ -151,12 +167,14 @@ Translates Anthropic/OpenAI requests to Codex Responses API via `chatgpt.com`. U
 ## Available Endpoints
 
 ### Core API
+
 - `POST /v1/messages` — Anthropic Messages API
 - `POST /v1/chat/completions` — OpenAI Chat Completions API
 - `GET /v1/models` / `GET /models` — Model listing
 - `GET /health` — Health check
 
 ### Bridge Diagnostics
+
 - `GET /bridge/surfaces` — All known surfaces with mapping decisions
 - `GET /bridge/surfaces/:id` — Surface detail
 - `GET /bridge/compatibility` — Full compatibility matrix
@@ -169,7 +187,7 @@ Translates Anthropic/OpenAI requests to Codex Responses API via `chatgpt.com`. U
 The proxy maps Claude Code surfaces across 6 tiers:
 
 | Tier | Surfaces | Strategy |
-|---|---|---|
+| --- | --- | --- |
 | 0 | Read, Write, Edit, MultiEdit, Glob, Grep, LS, Bash | `native` / `mediated_native` |
 | 1 | Task*, Agent, SendMessage, AskUserQuestion, /sandbox, review family | `mediated_native` |
 | 2 | Plan mode, Worktree, /resume, /rewind, /permissions | `mediated_native` |
