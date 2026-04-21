@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::app_server::UserInput;
 use crate::app_server::session::DelegationPolicy;
 use crate::app_server::thread::BridgeThread;
+use crate::jobs::{ExecutorRequest, JobExecutor};
 use crate::jobs::model::{JobKind, JobRecord, JobStatus};
 use crate::jobs::registry::JobRegistry;
 use crate::mapping::tools::ToolWarning;
@@ -27,6 +29,7 @@ pub async fn map_agent_spawn(
     request: AgentSpawnRequest,
     thread: &BridgeThread,
     policy: &DelegationPolicy,
+    executor: Option<&JobExecutor>,
     registry: &JobRegistry,
 ) -> AgentSpawnResult {
     match policy {
@@ -37,6 +40,24 @@ pub async fn map_agent_spawn(
             warnings: Vec::new(),
         },
         DelegationPolicy::ExplicitOnly | DelegationPolicy::Heuristic | DelegationPolicy::ForceForSurface(_) => {
+            if let Some(executor) = executor {
+                if let Ok(start) = executor.start_job(ExecutorRequest {
+                    origin_surface_id: "tool.agent".to_string(),
+                    kind: JobKind::Subagent,
+                    cwd: request.cwd.clone().unwrap_or_else(|| thread.cwd.clone()),
+                    model: "gpt-5.4".to_string(),
+                    developer_instructions: None,
+                    input: vec![UserInput::Text { text: request.task.clone() }],
+                }).await {
+                    return AgentSpawnResult {
+                        job_id: start.job_id,
+                        allowed: true,
+                        reason: None,
+                        warnings: Vec::new(),
+                    };
+                }
+            }
+
             let job_id = format!("agent-{}", simple_id());
             let job = JobRecord {
                 job_id: job_id.clone(),
@@ -45,10 +66,12 @@ pub async fn map_agent_spawn(
                 status: JobStatus::Queued,
                 scheduler_mode: None,
                 codex_thread_id: Some(thread.thread_id.clone()),
+                codex_turn_id: None,
                 codex_agent_ids: Vec::new(),
                 worktree_path: None,
                 result_summary: Some(request.task.clone()),
                 warnings: Vec::new(),
+                error_message: None,
             };
             registry.insert(job).await;
             AgentSpawnResult {
@@ -71,11 +94,19 @@ pub struct SendMessageRequest {
 
 pub async fn map_send_message(
     request: SendMessageRequest,
+    executor: Option<&JobExecutor>,
     registry: &JobRegistry,
 ) -> Result<(), String> {
     if let Some(job) = registry.get(&request.agent_id).await {
         if job.kind == JobKind::Subagent && job.status == JobStatus::Running {
-            Ok(())
+            if let Some(executor) = executor {
+                executor
+                    .send_input(&request.agent_id, request.message)
+                    .await
+                    .map_err(|err| err.to_string())
+            } else {
+                Ok(())
+            }
         } else {
             Err(format!("Agent {} is not running", request.agent_id))
         }
@@ -120,6 +151,7 @@ mod tests {
             AgentSpawnRequest { task: "review code".to_string(), cwd: None },
             &test_thread(),
             &DelegationPolicy::ExplicitOnly,
+            None,
             &registry,
         ).await;
         assert!(result.allowed);
@@ -134,6 +166,7 @@ mod tests {
             AgentSpawnRequest { task: "review code".to_string(), cwd: None },
             &test_thread(),
             &DelegationPolicy::Never,
+            None,
             &registry,
         ).await;
         assert!(!result.allowed);
@@ -152,6 +185,7 @@ mod tests {
             AgentSpawnRequest { task: "fix bug".to_string(), cwd: None },
             &parent_thread,
             &DelegationPolicy::ExplicitOnly,
+            None,
             &registry,
         ).await;
         assert!(child.allowed);
@@ -170,6 +204,7 @@ mod tests {
             AgentSpawnRequest { task: "review code".to_string(), cwd: None },
             &parent_thread,
             &DelegationPolicy::ExplicitOnly,
+            None,
             &registry,
         ).await;
         assert!(child2.allowed);

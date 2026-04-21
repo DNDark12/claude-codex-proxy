@@ -48,10 +48,12 @@ pub struct JobRecord {
     pub status: JobStatus,
     pub scheduler_mode: Option<SchedulerMode>,
     pub codex_thread_id: Option<String>,
+    pub codex_turn_id: Option<String>,
     #[serde(default)]
     pub codex_agent_ids: Vec<String>,
     pub worktree_path: Option<String>,
     pub result_summary: Option<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    pub error_message: Option<String>,
 }

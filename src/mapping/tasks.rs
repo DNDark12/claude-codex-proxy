@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::app_server::UserInput;
 use crate::app_server::thread::BridgeThread;
+use crate::jobs::{ExecutorRequest, JobExecutor};
 use crate::jobs::model::{JobKind, JobRecord, JobStatus};
 use crate::jobs::registry::JobRegistry;
 use crate::mapping::tools::ToolWarning;
@@ -26,8 +28,42 @@ pub struct TaskCreateResult {
 pub async fn map_task_create(
     request: TaskCreateRequest,
     thread: &BridgeThread,
+    executor: Option<&JobExecutor>,
     registry: &JobRegistry,
 ) -> TaskCreateResult {
+    let task_text = match request.instructions.as_deref() {
+        Some(instructions) if !instructions.is_empty() => {
+            format!("{}\n\n{}", request.description, instructions)
+        }
+        _ => request.description.clone(),
+    };
+
+    if let Some(executor) = executor {
+        if let Ok(start) = executor
+            .start_job(ExecutorRequest {
+                origin_surface_id: "tool.task_create".to_string(),
+                kind: JobKind::Task,
+                cwd: request.cwd.unwrap_or_else(|| thread.cwd.clone()),
+                model: "gpt-5.4".to_string(),
+                developer_instructions: None,
+                input: vec![UserInput::Text { text: task_text }],
+            })
+            .await
+        {
+            let status = registry
+                .get(&start.job_id)
+                .await
+                .map(|job| job.status)
+                .unwrap_or(JobStatus::Running);
+            return TaskCreateResult {
+                job_id: start.job_id,
+                thread_id: Some(start.thread_id),
+                status,
+                warnings: Vec::new(),
+            };
+        }
+    }
+
     let job_id = format!("task-{}", uuid_v4());
     let job = JobRecord {
         job_id: job_id.clone(),
@@ -36,6 +72,7 @@ pub async fn map_task_create(
         status: JobStatus::Queued,
         scheduler_mode: None,
         codex_thread_id: Some(thread.thread_id.clone()),
+        codex_turn_id: None,
         codex_agent_ids: Vec::new(),
         worktree_path: None,
         result_summary: Some(match request.instructions.as_deref() {
@@ -45,6 +82,7 @@ pub async fn map_task_create(
             _ => request.description.clone(),
         }),
         warnings: Vec::new(),
+        error_message: None,
     };
     registry.insert(job).await;
 
@@ -72,9 +110,23 @@ pub async fn map_task_list(registry: &JobRegistry) -> Vec<JobRecord> {
 pub async fn map_task_update(
     job_id: &str,
     update: Value,
+    executor: Option<&JobExecutor>,
     registry: &JobRegistry,
 ) -> Option<JobRecord> {
     if let Some(mut job) = registry.get(job_id).await {
+        if let Some(text) = update
+            .get("text")
+            .or_else(|| update.get("input"))
+            .and_then(|v| v.as_str())
+        {
+            if let Some(executor) = executor {
+                if executor.send_input(job_id, text.to_string()).await.is_err() {
+                    return None;
+                }
+            }
+            job.status = JobStatus::Running;
+            job.result_summary = Some(text.to_string());
+        }
         if let Some(summary) = update.get("resultSummary").and_then(|v| v.as_str()) {
             job.result_summary = Some(summary.to_string());
         }
@@ -94,8 +146,15 @@ pub async fn map_task_update(
     }
 }
 
-pub async fn map_task_stop(job_id: &str, registry: &JobRegistry) -> Option<JobRecord> {
+pub async fn map_task_stop(
+    job_id: &str,
+    executor: Option<&JobExecutor>,
+    registry: &JobRegistry,
+) -> Option<JobRecord> {
     if let Some(mut job) = registry.get(job_id).await {
+        if let Some(executor) = executor {
+            let _ = executor.interrupt(job_id).await;
+        }
         job.status = JobStatus::Cancelled;
         registry.insert(job.clone()).await;
         Some(job)
@@ -139,6 +198,7 @@ mod tests {
         let result = map_task_create(
             TaskCreateRequest { description: "test".to_string(), instructions: None, cwd: None },
             &test_thread(),
+            None,
             &registry,
         ).await;
         assert_eq!(result.status, JobStatus::Queued);
@@ -152,6 +212,7 @@ mod tests {
         let result = map_task_create(
             TaskCreateRequest { description: "a".to_string(), instructions: None, cwd: None },
             &test_thread(),
+            None,
             &registry,
         ).await;
         assert!(map_task_get(&result.job_id, &registry).await.is_some());
@@ -164,9 +225,10 @@ mod tests {
         let result = map_task_create(
             TaskCreateRequest { description: "x".to_string(), instructions: None, cwd: None },
             &test_thread(),
+            None,
             &registry,
         ).await;
-        let stopped = map_task_stop(&result.job_id, &registry).await.unwrap();
+        let stopped = map_task_stop(&result.job_id, None, &registry).await.unwrap();
         assert_eq!(stopped.status, JobStatus::Cancelled);
     }
 }

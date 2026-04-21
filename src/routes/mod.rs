@@ -1,19 +1,17 @@
+mod dispatch;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use serde::Serialize;
 use serde_json::json;
-use tokio::sync::{broadcast, RwLock};
-use tokio::time::timeout;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 use warp::{http::StatusCode, Filter, Reply};
 
 use crate::adapters::claude_output::BridgeMetadata;
-use crate::app_server::{
-    ApiStability, AppServerClient, ThreadStartRequest, TurnStartRequest, UserInput,
-};
-use crate::app_server::{BridgeSession, BridgeThread, DelegationPolicy, TransportKind};
+use crate::app_server::{ApiStability, AppServerClient, DelegationPolicy, UserInput};
 use crate::domain::anthropic::{AnthropicError, AnthropicErrorBody, AnthropicMessagesRequest};
 use crate::domain::anthropic::{
     AnthropicMessagesResponse, AnthropicResponseContentBlock, AnthropicUsage,
@@ -23,16 +21,17 @@ use crate::domain::openai::{
     ChatCompletionsRequest, ChatCompletionsResponse, OpenAIChoice, OpenAIResponseMessage,
     OpenAIUsage,
 };
-use crate::jobs::JobRegistry;
-use crate::mapping::approvals::{ApprovalPolicy, SandboxConfig};
+use crate::jobs::{ExecutorRequest, JobCollectionError, JobExecutor, JobKind, JobRegistry};
 use crate::mapping::commands::{
     map_mcp_command, map_plugin_command, map_schedule_command, map_security_review_command,
     map_tasks_command, CommandResult,
 };
 use crate::mapping::guidance::{map_init_guidance, map_memory_import};
+#[cfg(test)]
+use crate::mapping::approvals::SandboxConfig;
 use crate::mapping::planning::map_plan_command;
 use crate::mapping::review::ReviewRequest;
-use crate::model_profiles::{expand_public_models, resolve_model_profile};
+use crate::model_profiles::expand_public_models;
 use crate::observability::traces::log_mapping_decision;
 use crate::proxy::codex_client::{CodexClient, UpstreamError};
 use crate::skills::{prepare_anthropic_request, SkillRegistry};
@@ -41,14 +40,20 @@ use crate::surfaces::{
     ClassifiedSurface, CompatibilityMatrix, OperationMode, SurfaceClassifier, SurfaceRegistry,
 };
 use crate::translation::anthropic_to_codex::translate_anthropic_to_codex;
-use crate::translation::anthropic_to_codex::effective_anthropic_reasoning_effort;
+use crate::translation::app_server_to_anthropic::{
+    collect_app_server_to_anthropic, stream_executor_job_to_anthropic,
+};
+use crate::translation::app_server_to_openai::{
+    collect_app_server_to_openai, stream_executor_job_to_openai,
+};
 use crate::translation::codex_to_anthropic::{
     collect_codex_to_anthropic, stream_codex_to_anthropic,
 };
 use crate::translation::codex_to_openai::{collect_codex_to_openai, stream_codex_to_openai};
 use crate::translation::openai_to_codex::translate_openai_to_codex;
-use crate::translation::openai_to_codex::effective_openai_reasoning_effort;
 use crate::translation::tool_runtime::ToolRegistry;
+
+use self::dispatch::{DispatchBackend, DispatchPlanner};
 
 /// Cached upstream rate-limit so subsequent retries are rejected instantly.
 #[derive(Clone)]
@@ -63,6 +68,7 @@ struct CachedRateLimit {
 struct AppState {
     client: Option<Arc<CodexClient>>,
     app_server: Option<Arc<AppServerClient>>,
+    executor: Option<Arc<JobExecutor>>,
     skill_registry: Option<Arc<SkillRegistry>>,
     surface_registry: Arc<SurfaceRegistry>,
     compatibility_matrix: Arc<CompatibilityMatrix>,
@@ -78,6 +84,7 @@ struct AppState {
 pub struct RouteBuildOptions {
     pub client: Option<CodexClient>,
     pub app_server: Option<AppServerClient>,
+    pub executor: Option<JobExecutor>,
     pub skill_registry: Option<SkillRegistry>,
     pub surface_registry: SurfaceRegistry,
     pub compatibility_matrix: CompatibilityMatrix,
@@ -95,6 +102,7 @@ pub fn build_routes(
     let state = AppState {
         client: options.client.map(Arc::new),
         app_server: options.app_server.map(Arc::new),
+        executor: options.executor.map(Arc::new),
         skill_registry: options.skill_registry.map(Arc::new),
         surface_registry: surface_registry.clone(),
         compatibility_matrix: Arc::new(options.compatibility_matrix),
@@ -301,18 +309,6 @@ async fn handle_openai_chat(
         }
     };
 
-    // Short-circuit if upstream rate-limit is cached.
-    if let Some(cached_body) = check_rate_limit_guard(&state).await {
-        log::info!("[{trace_id}] rate-limit guard active, rejecting immediately");
-        return Ok(
-            warp::reply::with_status(
-                warp::reply::json(&cached_body),
-                StatusCode::TOO_MANY_REQUESTS,
-            )
-            .into_response(),
-        );
-    }
-
     log_request_summary(
         &trace_id,
         "openai",
@@ -327,42 +323,149 @@ async fn handle_openai_chat(
     log_surface_summary(&trace_id, &classified_surfaces);
     log_surface_decisions(&state, &classified_surfaces);
     let response_bridge = primary_bridge_metadata(&state, &classified_surfaces);
+    let dispatch_plan = DispatchPlanner::plan_openai(
+        &request,
+        &classified_surfaces,
+        state.operation_mode,
+        state.app_server.is_some(),
+        &state.compatibility_matrix,
+    );
 
     if let Some(response) = try_openai_local_command(&state, &request).await {
         return Ok(response);
     }
 
-    if let Some(app_server) = state.app_server.as_ref() {
-        if let Some(prompt) = build_openai_app_server_prompt(&request) {
-            return match try_openai_via_app_server(
-                app_server,
-                &state,
-                &request,
-                prompt,
-                response_bridge.clone(),
-            )
-            .await
-            {
-                Ok(response) => Ok(response),
-                Err(err) if matches!(state.operation_mode, OperationMode::AutoHybrid) => {
-                    log::warn!(
-                        "[{trace_id}] app-server openai path failed, fallback to responses: {err}"
-                    );
-                    handle_openai_via_responses(
-                        trace_id,
-                        headers,
-                        request,
-                        state,
-                        response_bridge,
-                    )
-                    .await
-                }
-                Err(err) => Ok(openai_error(
-                    StatusCode::BAD_GATEWAY,
-                    &format!("App-server request failed: {err}"),
-                    "app_server_error",
-                )),
+    if matches!(dispatch_plan.backend, DispatchBackend::ResponsesFallback) {
+        if let Some(cached_body) = check_rate_limit_guard(&state).await {
+            log::info!("[{trace_id}] rate-limit guard active for responses fallback");
+            return Ok(
+                warp::reply::with_status(
+                    warp::reply::json(&cached_body),
+                    StatusCode::TOO_MANY_REQUESTS,
+                )
+                .into_response(),
+            );
+        }
+    }
+
+    if matches!(dispatch_plan.backend, DispatchBackend::AppServer) {
+        if let (Some(executor), Some(prompt)) =
+            (state.executor.as_ref(), build_openai_app_server_prompt(&request))
+        {
+            let executor_request = ExecutorRequest {
+                origin_surface_id: primary_surface_id(&classified_surfaces)
+                    .unwrap_or_else(|| "openai.chat.completions".to_string()),
+                kind: job_kind_for_surfaces(&classified_surfaces),
+                cwd: std::env::current_dir()
+                    .ok()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_else(|| ".".to_string()),
+                model: request.model.clone(),
+                developer_instructions: None,
+                input: vec![UserInput::Text { text: prompt }],
             };
+            let tool_registry = ToolRegistry::from_openai_request(&request);
+
+            match dispatch_plan.execution_mode {
+                self::dispatch::ExecutionMode::AttachedStream => {
+                    match executor.start_job(executor_request).await {
+                        Ok(start) => {
+                            let Some(rx) = executor.subscribe(&start.job_id).await else {
+                                return Ok(openai_error(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "Executor stream subscription is unavailable",
+                                    "bridge_unavailable",
+                                ));
+                            };
+                            let stream = stream_executor_job_to_openai(
+                                rx,
+                                format!("chatcmpl-{}", Uuid::new_v4()),
+                                request.model.clone(),
+                            );
+                            let sse = warp::sse::reply(warp::sse::keep_alive().stream(stream));
+                            let sse = warp::reply::with_header(sse, "cache-control", "no-cache");
+                            let sse = warp::reply::with_header(sse, "x-accel-buffering", "no");
+                            return Ok(sse.into_response());
+                        }
+                        Err(err) if matches!(state.operation_mode, OperationMode::AutoHybrid) => {
+                            log::warn!("[{trace_id}] executor openai stream path failed, fallback to responses: {err}");
+                        }
+                        Err(err) => {
+                            return Ok(openai_error(
+                                StatusCode::BAD_GATEWAY,
+                                &format!("App-server request failed: {err}"),
+                                "app_server_error",
+                            ));
+                        }
+                    }
+                }
+                self::dispatch::ExecutionMode::AttachedCollect => {
+                    match executor.start_job(executor_request).await {
+                        Ok(start) => {
+                            match executor
+                                .collect_until_complete(&start.job_id, app_server_turn_timeout())
+                                .await
+                            {
+                                Ok(events) => {
+                                    let payload = collect_app_server_to_openai(
+                                        &format!("chatcmpl-{}", Uuid::new_v4()),
+                                        &request.model,
+                                        &events,
+                                        tool_registry,
+                                    );
+                                    return Ok(json_response_with_bridge(&payload, response_bridge.as_ref()));
+                                }
+                                Err(JobCollectionError::Timeout) => {
+                                    return Ok(openai_error(
+                                        StatusCode::GATEWAY_TIMEOUT,
+                                        "App-server turn timed out",
+                                        "app_server_timeout",
+                                    ));
+                                }
+                                Err(JobCollectionError::NotFound) if matches!(state.operation_mode, OperationMode::AutoHybrid) => {
+                                    log::warn!("[{trace_id}] executor lost openai job before collection; falling back to responses");
+                                }
+                                Err(JobCollectionError::NotFound) => {
+                                    return Ok(openai_error(
+                                        StatusCode::BAD_GATEWAY,
+                                        "Executor job was not found",
+                                        "app_server_error",
+                                    ));
+                                }
+                            }
+                        }
+                        Err(err) if matches!(state.operation_mode, OperationMode::AutoHybrid) => {
+                            log::warn!("[{trace_id}] executor openai collect path failed, fallback to responses: {err}");
+                        }
+                        Err(err) => {
+                            return Ok(openai_error(
+                                StatusCode::BAD_GATEWAY,
+                                &format!("App-server request failed: {err}"),
+                                "app_server_error",
+                            ));
+                        }
+                    }
+                }
+                self::dispatch::ExecutionMode::DetachedBackground => {
+                    match executor.start_job(executor_request).await {
+                        Ok(start) => {
+                            let body = format!("Background job started: {}", start.job_id);
+                            let payload = make_openai_background_ack(&request.model, &body);
+                            return Ok(json_response_with_bridge(&payload, response_bridge.as_ref()));
+                        }
+                        Err(err) if matches!(state.operation_mode, OperationMode::AutoHybrid) => {
+                            log::warn!("[{trace_id}] executor openai background path failed, fallback to responses: {err}");
+                        }
+                        Err(err) => {
+                            return Ok(openai_error(
+                                StatusCode::BAD_GATEWAY,
+                                &format!("App-server request failed: {err}"),
+                                "app_server_error",
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -462,18 +565,6 @@ async fn handle_anthropic_messages(
         }
     };
 
-    // Short-circuit if upstream rate-limit is cached.
-    if let Some(cached_body) = check_rate_limit_guard(&state).await {
-        log::info!("[{trace_id}] rate-limit guard active, rejecting immediately");
-        return Ok(
-            warp::reply::with_status(
-                warp::reply::json(&cached_body),
-                StatusCode::TOO_MANY_REQUESTS,
-            )
-            .into_response(),
-        );
-    }
-
     log_request_summary(
         &trace_id,
         "anthropic",
@@ -488,34 +579,150 @@ async fn handle_anthropic_messages(
     log_surface_summary(&trace_id, &classified_surfaces);
     log_surface_decisions(&state, &classified_surfaces);
     let response_bridge = primary_bridge_metadata(&state, &classified_surfaces);
+    let dispatch_plan = DispatchPlanner::plan_anthropic(
+        &request,
+        &classified_surfaces,
+        state.operation_mode,
+        state.app_server.is_some(),
+        &state.compatibility_matrix,
+    );
 
     if let Some(response) = try_anthropic_local_command(&state, &request).await {
         return Ok(response);
     }
 
-    if let Some(app_server) = state.app_server.as_ref() {
-        if let Some((system_prompt, prompt)) = build_anthropic_app_server_prompt(&request) {
-            return match try_anthropic_via_app_server(
-                app_server,
-                &state,
-                &request,
-                system_prompt,
-                prompt,
-                response_bridge.clone(),
-            )
-            .await
-            {
-                Ok(response) => Ok(response),
-                Err(err) if matches!(state.operation_mode, OperationMode::AutoHybrid) => {
-                    log::warn!("[{trace_id}] app-server anthropic path failed, fallback to responses: {err}");
-                    handle_anthropic_via_responses(trace_id, request, state, response_bridge).await
-                }
-                Err(err) => Ok(anthropic_error(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    &format!("App-server request failed: {err}"),
-                )),
+    if matches!(dispatch_plan.backend, DispatchBackend::ResponsesFallback) {
+        if let Some(cached_body) = check_rate_limit_guard(&state).await {
+            log::info!("[{trace_id}] rate-limit guard active for responses fallback");
+            return Ok(
+                warp::reply::with_status(
+                    warp::reply::json(&cached_body),
+                    StatusCode::TOO_MANY_REQUESTS,
+                )
+                .into_response(),
+            );
+        }
+    }
+
+    if matches!(dispatch_plan.backend, DispatchBackend::AppServer) {
+        if let (Some(executor), Some((system_prompt, prompt))) = (
+            state.executor.as_ref(),
+            build_anthropic_app_server_prompt(&request),
+        ) {
+            let executor_request = ExecutorRequest {
+                origin_surface_id: primary_surface_id(&classified_surfaces)
+                    .unwrap_or_else(|| "anthropic.messages".to_string()),
+                kind: job_kind_for_surfaces(&classified_surfaces),
+                cwd: std::env::current_dir()
+                    .ok()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_else(|| ".".to_string()),
+                model: request.model.clone(),
+                developer_instructions: system_prompt,
+                input: vec![UserInput::Text { text: prompt }],
             };
+            let tool_registry = ToolRegistry::from_anthropic_request(&request, None);
+
+            match dispatch_plan.execution_mode {
+                self::dispatch::ExecutionMode::AttachedStream => {
+                    match executor.start_job(executor_request).await {
+                        Ok(start) => {
+                            let Some(rx) = executor.subscribe(&start.job_id).await else {
+                                return Ok(anthropic_error(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "api_error",
+                                    "Executor stream subscription is unavailable",
+                                ));
+                            };
+                            let stream = stream_executor_job_to_anthropic(
+                                rx,
+                                format!("msg_{}", Uuid::new_v4().simple()),
+                                request.model.clone(),
+                            );
+                            let sse = warp::sse::reply(warp::sse::keep_alive().stream(stream));
+                            let sse = warp::reply::with_header(sse, "cache-control", "no-cache");
+                            let sse = warp::reply::with_header(sse, "x-accel-buffering", "no");
+                            return Ok(sse.into_response());
+                        }
+                        Err(err) if matches!(state.operation_mode, OperationMode::AutoHybrid) => {
+                            log::warn!("[{trace_id}] executor anthropic stream path failed, fallback to responses: {err}");
+                        }
+                        Err(err) => {
+                            return Ok(anthropic_error(
+                                StatusCode::BAD_GATEWAY,
+                                "api_error",
+                                &format!("App-server request failed: {err}"),
+                            ));
+                        }
+                    }
+                }
+                self::dispatch::ExecutionMode::AttachedCollect => {
+                    match executor.start_job(executor_request).await {
+                        Ok(start) => {
+                            match executor
+                                .collect_until_complete(&start.job_id, app_server_turn_timeout())
+                                .await
+                            {
+                                Ok(events) => {
+                                    let payload = collect_app_server_to_anthropic(
+                                        &format!("msg_{}", Uuid::new_v4().simple()),
+                                        &request.model,
+                                        &events,
+                                        tool_registry,
+                                    );
+                                    return Ok(json_response_with_bridge(&payload, response_bridge.as_ref()));
+                                }
+                                Err(JobCollectionError::Timeout) => {
+                                    return Ok(anthropic_error(
+                                        StatusCode::GATEWAY_TIMEOUT,
+                                        "api_error",
+                                        "App-server turn timed out",
+                                    ));
+                                }
+                                Err(JobCollectionError::NotFound) if matches!(state.operation_mode, OperationMode::AutoHybrid) => {
+                                    log::warn!("[{trace_id}] executor lost anthropic job before collection; falling back to responses");
+                                }
+                                Err(JobCollectionError::NotFound) => {
+                                    return Ok(anthropic_error(
+                                        StatusCode::BAD_GATEWAY,
+                                        "api_error",
+                                        "Executor job was not found",
+                                    ));
+                                }
+                            }
+                        }
+                        Err(err) if matches!(state.operation_mode, OperationMode::AutoHybrid) => {
+                            log::warn!("[{trace_id}] executor anthropic collect path failed, fallback to responses: {err}");
+                        }
+                        Err(err) => {
+                            return Ok(anthropic_error(
+                                StatusCode::BAD_GATEWAY,
+                                "api_error",
+                                &format!("App-server request failed: {err}"),
+                            ));
+                        }
+                    }
+                }
+                self::dispatch::ExecutionMode::DetachedBackground => {
+                    match executor.start_job(executor_request).await {
+                        Ok(start) => {
+                            let body = format!("Background job started: {}", start.job_id);
+                            let payload = make_background_ack(&request.model, &body);
+                            return Ok(json_response_with_bridge(&payload, response_bridge.as_ref()));
+                        }
+                        Err(err) if matches!(state.operation_mode, OperationMode::AutoHybrid) => {
+                            log::warn!("[{trace_id}] executor anthropic background path failed, fallback to responses: {err}");
+                        }
+                        Err(err) => {
+                            return Ok(anthropic_error(
+                                StatusCode::BAD_GATEWAY,
+                                "api_error",
+                                &format!("App-server request failed: {err}"),
+                            ));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -764,17 +971,6 @@ struct LocalCommandOutcome {
     body: String,
 }
 
-enum AppServerTurnOutcome {
-    Completed(Vec<crate::app_server::AppServerEvent>),
-    Interrupted(ServerTurnInterruption),
-}
-
-struct ServerTurnInterruption {
-    kind: &'static str,
-    message: String,
-    payload: serde_json::Value,
-}
-
 async fn try_anthropic_local_command(
     state: &AppState,
     request: &AnthropicMessagesRequest,
@@ -861,7 +1057,12 @@ async fn dispatch_local_command(state: &AppState, text: &str) -> Option<LocalCom
             Some(LocalCommandOutcome {
                 surface_id: "command.security_review".to_string(),
                 body: render_command_result(
-                    &map_security_review_command(request, &state.job_registry).await,
+                    &map_security_review_command(
+                        request,
+                        state.executor.as_deref(),
+                        &state.job_registry,
+                    )
+                    .await,
                 ),
             })
         }
@@ -984,166 +1185,6 @@ fn render_memory_import(result: &crate::mapping::guidance::MemoryImportResult) -
         }
     }
     body
-}
-
-async fn wait_for_turn_outcome(
-    thread_id: &str,
-    turn_id: &str,
-    mut notifications: broadcast::Receiver<crate::app_server::JsonRpcNotification>,
-    mut server_requests: broadcast::Receiver<crate::app_server::JsonRpcRequest>,
-) -> anyhow::Result<AppServerTurnOutcome> {
-    let mut events = Vec::new();
-
-    loop {
-        tokio::select! {
-            notification = notifications.recv() => {
-                match notification {
-                    Ok(notification) => {
-                        let event = crate::app_server::AppServerEvent::from(notification);
-                        if event.thread_id.as_deref() != Some(thread_id) {
-                            continue;
-                        }
-
-                        if event.turn_id.as_deref() != Some(turn_id) && !matches!(event.kind, crate::app_server::AppServerEventKind::TurnCompleted | crate::app_server::AppServerEventKind::TurnStarted) {
-                            continue;
-                        }
-
-                        let done = matches!(event.kind, crate::app_server::AppServerEventKind::TurnCompleted);
-                        events.push(event);
-                        if done {
-                            return Ok(AppServerTurnOutcome::Completed(events));
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => {
-                        anyhow::bail!("app-server notification channel closed")
-                    }
-                }
-            }
-            request = server_requests.recv() => {
-                match request {
-                    Ok(request) => {
-                        if request.params.get("threadId").and_then(|value| value.as_str()) != Some(thread_id) {
-                            continue;
-                        }
-                        if request.params.get("turnId").and_then(|value| value.as_str()) != Some(turn_id) {
-                            continue;
-                        }
-                        if let Some(interruption) = describe_server_request(&request) {
-                            return Ok(AppServerTurnOutcome::Interrupted(interruption));
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => {
-                        anyhow::bail!("app-server server-request channel closed")
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn describe_server_request(
-    request: &crate::app_server::JsonRpcRequest,
-) -> Option<ServerTurnInterruption> {
-    match request.method.as_str() {
-        "item/commandExecution/requestApproval" => {
-            let command = request
-                .params
-                .get("command")
-                .and_then(|value| value.as_str())
-                .unwrap_or("command execution");
-            let reason = request
-                .params
-                .get("reason")
-                .and_then(|value| value.as_str())
-                .unwrap_or("Approval is required before continuing.");
-            Some(ServerTurnInterruption {
-                kind: "approval_required",
-                message: format!("{reason} Command: {command}"),
-                payload: serde_json::json!({
-                    "method": request.method,
-                    "command": request.params.get("command").cloned(),
-                    "cwd": request.params.get("cwd").cloned(),
-                    "reason": request.params.get("reason").cloned(),
-                    "itemId": request.params.get("itemId").cloned(),
-                }),
-            })
-        }
-        "item/fileChange/requestApproval" => {
-            let reason = request
-                .params
-                .get("reason")
-                .and_then(|value| value.as_str())
-                .unwrap_or("File changes require approval before continuing.");
-            Some(ServerTurnInterruption {
-                kind: "approval_required",
-                message: reason.to_string(),
-                payload: serde_json::json!({
-                    "method": request.method,
-                    "grantRoot": request.params.get("grantRoot").cloned(),
-                    "reason": request.params.get("reason").cloned(),
-                    "itemId": request.params.get("itemId").cloned(),
-                }),
-            })
-        }
-        "item/tool/requestUserInput" => {
-            let question = request
-                .params
-                .get("questions")
-                .and_then(|value| value.as_array())
-                .and_then(|questions| questions.first())
-                .and_then(|question| question.get("question"))
-                .and_then(|value| value.as_str())
-                .unwrap_or("Additional user input is required.");
-            Some(ServerTurnInterruption {
-                kind: "clarification_required",
-                message: question.to_string(),
-                payload: serde_json::json!({
-                    "method": request.method,
-                    "questions": request.params.get("questions").cloned(),
-                    "itemId": request.params.get("itemId").cloned(),
-                }),
-            })
-        }
-        _ => None,
-    }
-}
-
-fn openai_turn_interrupted(interruption: &ServerTurnInterruption) -> warp::reply::Response {
-    warp::reply::with_status(
-        warp::reply::json(&json!({
-            "error": {
-                "message": interruption.message,
-                "type": interruption.kind,
-                "code": interruption.kind
-            },
-            "bridge": {
-                "event": interruption.kind
-            },
-            "interruption": interruption.payload,
-        })),
-        StatusCode::CONFLICT,
-    )
-    .into_response()
-}
-
-fn anthropic_turn_interrupted(interruption: &ServerTurnInterruption) -> warp::reply::Response {
-    warp::reply::with_status(
-        warp::reply::json(&json!({
-            "type": "error",
-            "error": {
-                "type": interruption.kind,
-                "message": interruption.message,
-            },
-            "bridge": {
-                "event": interruption.kind
-            },
-            "interruption": interruption.payload,
-        })),
-        StatusCode::CONFLICT,
-    )
-    .into_response()
 }
 
 async fn request_with_tool_fallback(
@@ -1327,18 +1368,49 @@ async fn cache_rate_limit(state: &AppState, body: &str) {
     });
 }
 
+fn app_server_turn_timeout() -> Duration {
+    std::env::var("APP_SERVER_TURN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(300))
+}
+
+fn primary_surface_id(surfaces: &[ClassifiedSurface]) -> Option<String> {
+    surfaces
+        .iter()
+        .find_map(|surface| surface.surface_id.clone())
+}
+
+fn job_kind_for_surfaces(surfaces: &[ClassifiedSurface]) -> JobKind {
+    for surface in surfaces {
+        match surface.surface_id.as_deref() {
+            Some("workflow.rescue_fix") => return JobKind::Rescue,
+            Some("workflow.code_review")
+            | Some("workflow.security_review")
+            | Some("command.security_review") => return JobKind::Review,
+            Some("tool.agent") | Some("tool.sendmessage") => return JobKind::Subagent,
+            Some("tool.taskcreate")
+            | Some("tool.taskget")
+            | Some("tool.tasklist")
+            | Some("tool.taskupdate")
+            | Some("tool.taskstop")
+            | Some("command.tasks")
+            | Some("command.resume") => return JobKind::Task,
+            _ => {}
+        }
+    }
+    JobKind::Task
+}
+
 fn build_anthropic_app_server_prompt(
     request: &AnthropicMessagesRequest,
 ) -> Option<(Option<String>, String)> {
-    if request.stream.unwrap_or(false) || request.tools.is_some() {
-        return None;
-    }
-
     let system_prompt = request.system.as_ref().and_then(flatten_anthropic_system);
     let mut messages = Vec::new();
 
     for message in &request.messages {
-        let content = flatten_anthropic_content(&message.content)?;
+        let content = flatten_anthropic_message_for_app_server(message)?;
         messages.push(format!("{}: {}", message.role, content));
     }
 
@@ -1346,163 +1418,44 @@ fn build_anthropic_app_server_prompt(
 }
 
 fn build_openai_app_server_prompt(request: &ChatCompletionsRequest) -> Option<String> {
-    if request.stream.unwrap_or(false)
-        || request.tools.is_some()
-        || request.functions.is_some()
-        || request
-            .messages
-            .iter()
-            .any(|message| message.tool_calls.is_some() || message.function_call.is_some())
-    {
-        return None;
-    }
-
     let mut messages = Vec::new();
     for message in &request.messages {
-        let content = flatten_openai_content(message.content.as_ref()?)?;
+        let content = flatten_openai_message_for_app_server(message)?;
         messages.push(format!("{}: {}", message.role, content));
     }
 
     Some(messages.join("\n\n"))
 }
 
-async fn try_anthropic_via_app_server(
-    client: &AppServerClient,
-    state: &AppState,
-    request: &AnthropicMessagesRequest,
-    system_prompt: Option<String>,
-    prompt: String,
-    bridge: Option<BridgeMetadata>,
-) -> anyhow::Result<warp::reply::Response> {
-    let cwd = std::env::current_dir()?.display().to_string();
-    let resolved_model = resolve_model_profile(&request.model);
-    let thread = client
-        .thread_start(ThreadStartRequest {
-            cwd: Some(cwd.clone()),
-            approval_policy: Some(ApprovalPolicy::OnRequest),
-            sandbox: Some(SandboxConfig::WorkspaceWrite),
-            model: Some(resolved_model.backend_model.clone()),
-            model_provider: None,
-            developer_instructions: system_prompt,
-            base_instructions: None,
-            ephemeral: Some(true),
-        })
-        .await?;
-    let notifications = client.subscribe_notifications();
-    let server_requests = client.subscribe_server_requests();
-    let reasoning_effort = effective_anthropic_reasoning_effort(request);
-    let turn = client
-        .turn_start(TurnStartRequest {
-            thread_id: thread.thread_id.clone(),
-            input: vec![UserInput::Text { text: prompt }],
-            approval_policy: None,
-            cwd: Some(thread.cwd.clone()),
-            model: Some(resolved_model.backend_model),
-            sandbox_policy: None,
-            effort: reasoning_effort.clone(),
-            summary: reasoning_effort.map(|_| "auto".to_string()),
-        })
-        .await?;
-    store_session(state, &thread).await;
-    let outcome = timeout(
-        Duration::from_secs(30),
-        wait_for_turn_outcome(
-            &thread.thread_id,
-            &turn.turn_id,
-            notifications,
-            server_requests,
-        ),
-    )
-    .await??;
-    let events = match outcome {
-        AppServerTurnOutcome::Completed(events) => events,
-        AppServerTurnOutcome::Interrupted(interruption) => {
-            client.turn_interrupt(&thread.thread_id, &turn.turn_id).await.ok();
-            return Ok(anthropic_turn_interrupted(&interruption));
-        }
-    };
-    let text = collect_text_from_events(&events);
-    let payload = AnthropicMessagesResponse {
-        id: format!("msg_{}", Uuid::new_v4()),
+fn make_background_ack(model: &str, body: &str) -> AnthropicMessagesResponse {
+    AnthropicMessagesResponse {
+        id: format!("msg_{}", Uuid::new_v4().simple()),
         response_type: "message".to_string(),
         role: "assistant".to_string(),
-        model: request.model.clone(),
-        content: vec![AnthropicResponseContentBlock::Text { text }],
+        model: model.to_string(),
+        content: vec![AnthropicResponseContentBlock::Text {
+            text: body.to_string(),
+        }],
         stop_reason: "end_turn".to_string(),
         stop_sequence: None,
         usage: AnthropicUsage {
             input_tokens: 0,
             output_tokens: 0,
         },
-    };
-    Ok(json_response_with_bridge(&payload, bridge.as_ref()))
+    }
 }
 
-async fn try_openai_via_app_server(
-    client: &AppServerClient,
-    state: &AppState,
-    request: &ChatCompletionsRequest,
-    prompt: String,
-    bridge: Option<BridgeMetadata>,
-) -> anyhow::Result<warp::reply::Response> {
-    let cwd = std::env::current_dir()?.display().to_string();
-    let resolved_model = resolve_model_profile(&request.model);
-    let thread = client
-        .thread_start(ThreadStartRequest {
-            cwd: Some(cwd.clone()),
-            approval_policy: Some(ApprovalPolicy::OnRequest),
-            sandbox: Some(SandboxConfig::WorkspaceWrite),
-            model: Some(resolved_model.backend_model.clone()),
-            model_provider: None,
-            developer_instructions: None,
-            base_instructions: None,
-            ephemeral: Some(true),
-        })
-        .await?;
-    let notifications = client.subscribe_notifications();
-    let server_requests = client.subscribe_server_requests();
-    let reasoning_effort = effective_openai_reasoning_effort(request);
-    let turn = client
-        .turn_start(TurnStartRequest {
-            thread_id: thread.thread_id.clone(),
-            input: vec![UserInput::Text { text: prompt }],
-            approval_policy: None,
-            cwd: Some(thread.cwd.clone()),
-            model: Some(resolved_model.backend_model),
-            sandbox_policy: None,
-            effort: reasoning_effort.clone(),
-            summary: reasoning_effort.map(|_| "auto".to_string()),
-        })
-        .await?;
-    store_session(state, &thread).await;
-    let outcome = timeout(
-        Duration::from_secs(30),
-        wait_for_turn_outcome(
-            &thread.thread_id,
-            &turn.turn_id,
-            notifications,
-            server_requests,
-        ),
-    )
-    .await??;
-    let events = match outcome {
-        AppServerTurnOutcome::Completed(events) => events,
-        AppServerTurnOutcome::Interrupted(interruption) => {
-            client.turn_interrupt(&thread.thread_id, &turn.turn_id).await.ok();
-            return Ok(openai_turn_interrupted(&interruption));
-        }
-    };
-    let text = collect_text_from_events(&events);
-    let payload = ChatCompletionsResponse {
+fn make_openai_background_ack(model: &str, body: &str) -> ChatCompletionsResponse {
+    ChatCompletionsResponse {
         id: format!("chatcmpl-{}", Uuid::new_v4()),
         object: "chat.completion".to_string(),
         created: chrono::Utc::now().timestamp(),
-        model: request.model.clone(),
+        model: model.to_string(),
         choices: vec![OpenAIChoice {
             index: 0,
             message: OpenAIResponseMessage {
                 role: "assistant".to_string(),
-                content: Some(text),
+                content: Some(body.to_string()),
                 tool_calls: None,
             },
             finish_reason: "stop".to_string(),
@@ -1512,61 +1465,7 @@ async fn try_openai_via_app_server(
             completion_tokens: 0,
             total_tokens: 0,
         },
-    };
-    Ok(json_response_with_bridge(&payload, bridge.as_ref()))
-}
-
-async fn store_session(state: &AppState, thread: &crate::app_server::ThreadStartResult) {
-    let previous = state
-        .state_store
-        .get_session(&thread.thread_id)
-        .await;
-    let sandbox_config = parse_sandbox_config(&thread.sandbox);
-    let session = BridgeSession {
-        bridge_session_id: thread.thread_id.clone(),
-        claude_session_id: None,
-        thread: BridgeThread {
-            thread_id: thread.thread_id.clone(),
-            bridge_session_id: thread.thread_id.clone(),
-            cwd: thread.cwd.clone(),
-            project_root: None,
-            approval_policy: thread.approval_policy,
-            sandbox_config,
-            created_at_unix: thread.created_at,
-            turn_count: previous
-                .as_ref()
-                .map(|session| session.thread.turn_count + 1)
-                .unwrap_or(1),
-        },
-        transport: TransportKind::Stdio,
-        operation_mode: state.operation_mode,
-        api_stability: state.api_stability,
-        delegation_policy: state.delegation_policy.clone(),
-        active_guidance_layers: previous
-            .as_ref()
-            .map(|session| session.active_guidance_layers.clone())
-            .unwrap_or_default(),
-        active_skills: previous
-            .as_ref()
-            .map(|session| session.active_skills.clone())
-            .unwrap_or_default(),
-        active_jobs: previous
-            .as_ref()
-            .map(|session| session.active_jobs.clone())
-            .unwrap_or_default(),
-        state_version: 1,
-    };
-    state.state_store.insert_session(session).await;
-}
-
-fn collect_text_from_events(events: &[crate::app_server::AppServerEvent]) -> String {
-    let mut text = String::new();
-    for event in events {
-        if let Some(delta) = &event.delta {
-            text.push_str(delta);
-        }
     }
-    text
 }
 
 fn flatten_anthropic_system(system: &crate::domain::anthropic::AnthropicSystem) -> Option<String> {
@@ -1602,6 +1501,47 @@ fn flatten_anthropic_content(
     }
 }
 
+fn flatten_anthropic_message_for_app_server(
+    message: &crate::domain::anthropic::AnthropicMessage,
+) -> Option<String> {
+    match &message.content {
+        crate::domain::anthropic::AnthropicContent::Text(text) => Some(text.clone()),
+        crate::domain::anthropic::AnthropicContent::Blocks(blocks) => {
+            let mut out = Vec::new();
+            for block in blocks {
+                match block {
+                    crate::domain::anthropic::AnthropicContentBlock::Text { text } => {
+                        out.push(text.clone())
+                    }
+                    crate::domain::anthropic::AnthropicContentBlock::ToolUse { id, name, input } => {
+                        out.push(format!(
+                            "[tool_use id={} name={} input={}]",
+                            id,
+                            name,
+                            serde_json::to_string(input).ok()?
+                        ));
+                    }
+                    crate::domain::anthropic::AnthropicContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => {
+                        out.push(format!(
+                            "[tool_result id={} is_error={} content={}]",
+                            tool_use_id,
+                            is_error.unwrap_or(false),
+                            render_jsonish_value(content)
+                        ));
+                    }
+                    crate::domain::anthropic::AnthropicContentBlock::Unknown => return None,
+                    crate::domain::anthropic::AnthropicContentBlock::Image { .. } => return None,
+                }
+            }
+            Some(out.join("\n"))
+        }
+    }
+}
+
 fn flatten_openai_content(content: &crate::domain::openai::OpenAIContent) -> Option<String> {
     match content {
         crate::domain::openai::OpenAIContent::Text(text) => Some(text.clone()),
@@ -1620,6 +1560,61 @@ fn flatten_openai_content(content: &crate::domain::openai::OpenAIContent) -> Opt
     }
 }
 
+fn flatten_openai_message_for_app_server(
+    message: &crate::domain::openai::OpenAIMessage,
+) -> Option<String> {
+    let mut parts = Vec::new();
+
+    if let Some(content) = message.content.as_ref() {
+        parts.push(flatten_openai_content(content)?);
+    }
+
+    if let Some(tool_calls) = message.tool_calls.as_ref() {
+        for call in tool_calls {
+            parts.push(format!(
+                "[tool_call id={} name={} arguments={}]",
+                call.id,
+                call.function.name,
+                call.function.arguments
+            ));
+        }
+    }
+
+    if let Some(function_call) = message.function_call.as_ref() {
+        parts.push(format!(
+            "[function_call name={} arguments={}]",
+            function_call.name,
+            function_call.arguments
+        ));
+    }
+
+    if message.role == "tool" {
+        parts.push(format!(
+            "[tool_result id={} content={}]",
+            message.tool_call_id.as_deref().unwrap_or("unknown"),
+            message
+                .content
+                .as_ref()
+                .and_then(flatten_openai_content)
+                .unwrap_or_default()
+        ));
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    Some(parts.join("\n"))
+}
+
+fn render_jsonish_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+    }
+}
+
+#[cfg(test)]
 fn parse_sandbox_config(value: &serde_json::Value) -> SandboxConfig {
     if let Some(mode) = value.as_str() {
         return match mode {
@@ -1713,6 +1708,7 @@ mod tests {
         let state = AppState {
             client: None,
             app_server: None,
+            executor: None,
             skill_registry: None,
             surface_registry: Arc::new(registry.clone()),
             compatibility_matrix: Arc::new(matrix),
@@ -1722,6 +1718,7 @@ mod tests {
             operation_mode: OperationMode::AutoHybrid,
             api_stability: ApiStability::Stable,
             delegation_policy: DelegationPolicy::ExplicitOnly,
+            rate_limit_guard: Arc::new(RwLock::new(None)),
         };
 
         let response = dispatch_local_command(&state, "/tasks").await.expect("command");
@@ -1736,6 +1733,7 @@ mod tests {
         let state = AppState {
             client: None,
             app_server: None,
+            executor: None,
             skill_registry: None,
             surface_registry: Arc::new(registry.clone()),
             compatibility_matrix: Arc::new(matrix),
@@ -1745,6 +1743,7 @@ mod tests {
             operation_mode: OperationMode::AutoHybrid,
             api_stability: ApiStability::Stable,
             delegation_policy: DelegationPolicy::ExplicitOnly,
+            rate_limit_guard: Arc::new(RwLock::new(None)),
         };
 
         let response = dispatch_local_command(&state, "/security-review src/")

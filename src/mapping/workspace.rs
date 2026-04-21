@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::app_server::thread::BridgeThread;
+use crate::jobs::registry::JobRegistry;
 use crate::mapping::tools::ToolWarning;
+use crate::state::StateStore;
 use crate::surfaces::model::MappingStrategy;
 
 /// Worktree association state (P4-015).
@@ -95,11 +97,25 @@ pub struct ResumeResult {
     pub thread_id: String,
 }
 
-pub fn map_resume(thread_id: &str) -> ResumeResult {
-    ResumeResult {
+pub async fn map_resume(
+    thread_id: &str,
+    _registry: &JobRegistry,
+    sessions: &StateStore,
+) -> Result<ResumeResult, String> {
+    let has_session = sessions
+        .list_sessions()
+        .await
+        .into_iter()
+        .any(|session| session.thread.thread_id == thread_id);
+
+    if !has_session {
+        return Err(format!("thread {} not found", thread_id));
+    }
+
+    Ok(ResumeResult {
         strategy: MappingStrategy::MediatedNative,
         thread_id: thread_id.to_string(),
-    }
+    })
 }
 
 /// /rewind mapping → thread/rollback (preferred) (P4-013).
@@ -161,9 +177,23 @@ mod tests {
     }
 
     // P4-T03: /resume → paused thread resumes with state intact
-    #[test]
-    fn resume_maps_to_thread_resume() {
-        let result = map_resume("t1");
+    #[tokio::test]
+    async fn resume_maps_to_thread_resume() {
+        let sessions = StateStore::default();
+        sessions.insert_session(crate::app_server::BridgeSession {
+            bridge_session_id: "s1".to_string(),
+            claude_session_id: None,
+            thread: test_thread(),
+            transport: crate::app_server::TransportKind::Stdio,
+            operation_mode: crate::surfaces::OperationMode::AutoHybrid,
+            api_stability: crate::app_server::ApiStability::Stable,
+            delegation_policy: crate::app_server::DelegationPolicy::ExplicitOnly,
+            active_guidance_layers: Vec::new(),
+            active_skills: Vec::new(),
+            active_jobs: Vec::new(),
+            state_version: 1,
+        }).await;
+        let result = map_resume("t1", &JobRegistry::default(), &sessions).await.unwrap();
         assert_eq!(result.strategy, MappingStrategy::MediatedNative);
         assert_eq!(result.thread_id, "t1");
     }

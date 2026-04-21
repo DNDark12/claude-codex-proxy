@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::jobs::registry::JobRegistry;
+use crate::jobs::{JobExecutor, registry::JobRegistry};
 use crate::mapping::review::ReviewRequest;
 use crate::surfaces::model::MappingStrategy;
 
@@ -30,9 +30,10 @@ pub async fn map_tasks_command(registry: &JobRegistry) -> CommandResult {
 /// `/security-review` command — trigger security review workflow (P3-025).
 pub async fn map_security_review_command(
     request: ReviewRequest,
+    executor: Option<&JobExecutor>,
     registry: &JobRegistry,
 ) -> CommandResult {
-    let result = crate::mapping::review::map_security_review(request, registry).await;
+    let result = crate::mapping::review::map_security_review(request, executor, registry).await;
     CommandResult {
         surface_id: "command.security_review".to_string(),
         strategy: MappingStrategy::WorkflowEmulated,

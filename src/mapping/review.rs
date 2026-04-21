@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::app_server::UserInput;
+use crate::jobs::{ExecutorRequest, JobExecutor};
 use crate::jobs::model::{JobKind, JobRecord, JobStatus};
 use crate::jobs::registry::JobRegistry;
 use crate::mapping::tools::ToolWarning;
@@ -33,8 +35,22 @@ pub struct ReviewFinding {
 
 pub async fn map_code_review(
     request: ReviewRequest,
+    executor: Option<&JobExecutor>,
     registry: &JobRegistry,
 ) -> ReviewResult {
+    if let Some(result) = start_review_job(
+        "workflow.code_review",
+        JobKind::Review,
+        review_summary(&request),
+        Some("Review for bugs, regressions, and missing tests.".to_string()),
+        executor,
+        registry,
+    )
+    .await
+    {
+        return result;
+    }
+
     let job_id = format!("review-{}", simple_id());
     let job = JobRecord {
         job_id: job_id.clone(),
@@ -43,10 +59,12 @@ pub async fn map_code_review(
         status: JobStatus::Queued,
         scheduler_mode: None,
         codex_thread_id: None,
+        codex_turn_id: None,
         codex_agent_ids: Vec::new(),
         worktree_path: None,
         result_summary: Some(review_summary(&request)),
         warnings: Vec::new(),
+        error_message: None,
     };
     registry.insert(job).await;
 
@@ -60,8 +78,22 @@ pub async fn map_code_review(
 
 pub async fn map_security_review(
     request: ReviewRequest,
+    executor: Option<&JobExecutor>,
     registry: &JobRegistry,
 ) -> ReviewResult {
+    if let Some(result) = start_review_job(
+        "workflow.security_review",
+        JobKind::Review,
+        review_summary(&request),
+        Some("Review for bugs, risks, and security issues.".to_string()),
+        executor,
+        registry,
+    )
+    .await
+    {
+        return result;
+    }
+
     let job_id = format!("secreview-{}", simple_id());
     let job = JobRecord {
         job_id: job_id.clone(),
@@ -70,10 +102,12 @@ pub async fn map_security_review(
         status: JobStatus::Queued,
         scheduler_mode: None,
         codex_thread_id: None,
+        codex_turn_id: None,
         codex_agent_ids: Vec::new(),
         worktree_path: None,
         result_summary: Some(review_summary(&request)),
         warnings: Vec::new(),
+        error_message: None,
     };
     registry.insert(job).await;
 
@@ -87,8 +121,22 @@ pub async fn map_security_review(
 
 pub async fn map_rescue_fix(
     request: ReviewRequest,
+    executor: Option<&JobExecutor>,
     registry: &JobRegistry,
 ) -> ReviewResult {
+    if let Some(result) = start_review_job(
+        "workflow.rescue_fix",
+        JobKind::Rescue,
+        review_summary(&request),
+        Some("Investigate the problem, propose a safe fix, and execute the rescue workflow.".to_string()),
+        executor,
+        registry,
+    )
+    .await
+    {
+        return result;
+    }
+
     let job_id = format!("rescue-{}", simple_id());
     let job = JobRecord {
         job_id: job_id.clone(),
@@ -97,10 +145,12 @@ pub async fn map_rescue_fix(
         status: JobStatus::Queued,
         scheduler_mode: None,
         codex_thread_id: None,
+        codex_turn_id: None,
         codex_agent_ids: Vec::new(),
         worktree_path: None,
         result_summary: Some(review_summary(&request)),
         warnings: Vec::new(),
+        error_message: None,
     };
     registry.insert(job).await;
 
@@ -110,6 +160,38 @@ pub async fn map_rescue_fix(
         findings: Vec::new(),
         warnings: Vec::new(),
     }
+}
+
+async fn start_review_job(
+    origin_surface_id: &str,
+    kind: JobKind,
+    prompt: String,
+    developer_instructions: Option<String>,
+    executor: Option<&JobExecutor>,
+    registry: &JobRegistry,
+) -> Option<ReviewResult> {
+    let executor = executor?;
+    let start = executor
+        .start_job(ExecutorRequest {
+            origin_surface_id: origin_surface_id.to_string(),
+            kind,
+            cwd: std::env::current_dir()
+                .ok()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|| ".".to_string()),
+            model: "gpt-5.4".to_string(),
+            developer_instructions,
+            input: vec![UserInput::Text { text: prompt }],
+        })
+        .await
+        .ok()?;
+    let job = registry.get(&start.job_id).await?;
+    Some(ReviewResult {
+        job_id: start.job_id,
+        status: job.status,
+        findings: Vec::new(),
+        warnings: Vec::new(),
+    })
 }
 
 pub async fn map_review_status(job_id: &str, registry: &JobRegistry) -> Option<JobRecord> {
@@ -162,6 +244,7 @@ mod tests {
         let registry = JobRegistry::default();
         let result = map_code_review(
             ReviewRequest { scope: Some("all".to_string()), files: None, instructions: None },
+            None,
             &registry,
         ).await;
         assert_eq!(result.status, JobStatus::Queued);
@@ -178,6 +261,7 @@ mod tests {
         let registry = JobRegistry::default();
         let result = map_security_review(
             ReviewRequest { scope: None, files: None, instructions: None },
+            None,
             &registry,
         ).await;
         assert!(!result.job_id.is_empty());
@@ -188,6 +272,7 @@ mod tests {
         let registry = JobRegistry::default();
         let result = map_rescue_fix(
             ReviewRequest { scope: None, files: None, instructions: None },
+            None,
             &registry,
         ).await;
         let job = registry.get(&result.job_id).await.unwrap();
@@ -201,6 +286,7 @@ mod tests {
         let registry = JobRegistry::default();
         let result = map_rescue_fix(
             ReviewRequest { scope: Some("src/".to_string()), files: None, instructions: Some("fix crash".to_string()) },
+            None,
             &registry,
         ).await;
         let mut job = registry.get(&result.job_id).await.unwrap();

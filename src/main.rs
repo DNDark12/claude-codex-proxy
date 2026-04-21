@@ -6,7 +6,7 @@ use claude_codex_proxy::app_server;
 use claude_codex_proxy::app_server::AppServerClient;
 use claude_codex_proxy::cli;
 use claude_codex_proxy::cli::{CliCommand, RuntimeArgs};
-use claude_codex_proxy::jobs::JobRegistry;
+use claude_codex_proxy::jobs::{JobExecutor, JobRegistry};
 use claude_codex_proxy::proxy::codex_client::CodexClient;
 use claude_codex_proxy::routes::{build_routes, RouteBuildOptions};
 use claude_codex_proxy::skills::load_skill_registry;
@@ -59,10 +59,21 @@ async fn serve(runtime_args: RuntimeArgs) -> Result<()> {
 
     let app_server = initialize_app_server(&runtime).await?;
     let legacy_client = initialize_legacy_client(&runtime).await?;
+    let executor = app_server.clone().map(|client| {
+        JobExecutor::with_runtime(
+            client,
+            job_registry.clone(),
+            state_store.clone(),
+            runtime.operation_mode,
+            runtime.api_stability,
+            runtime.delegation_policy.clone(),
+        )
+    });
 
     let routes = build_routes(RouteBuildOptions {
         client: legacy_client,
         app_server,
+        executor,
         skill_registry,
         surface_registry,
         compatibility_matrix,

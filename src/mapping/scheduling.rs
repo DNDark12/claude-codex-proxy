@@ -61,10 +61,12 @@ pub async fn map_cron_create(
         status: JobStatus::Running,
         scheduler_mode: mode,
         codex_thread_id: None,
+        codex_turn_id: None,
         codex_agent_ids: Vec::new(),
         worktree_path: None,
         result_summary: Some(format!("schedule={} prompt={}", request.schedule, request.prompt)),
         warnings: warnings.iter().map(|w| w.warning.clone()).collect(),
+        error_message: None,
     };
     registry.insert(job).await;
 

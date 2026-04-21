@@ -82,6 +82,34 @@ impl From<JsonRpcNotification> for AppServerEvent {
     }
 }
 
+impl AppServerEvent {
+    pub fn tool_name(&self) -> Option<&str> {
+        self.params
+            .get("toolName")
+            .or_else(|| self.params.get("item").and_then(|item| item.get("toolName")))
+            .and_then(Value::as_str)
+    }
+
+    pub fn terminal_action(&self) -> Option<&str> {
+        self.params.get("action").and_then(Value::as_str)
+    }
+
+    pub fn item_type(&self) -> Option<&str> {
+        self.params
+            .get("item")
+            .and_then(|item| item.get("type"))
+            .or_else(|| self.params.get("type"))
+            .and_then(Value::as_str)
+    }
+
+    pub fn tool_arguments_json(&self) -> Option<&Value> {
+        self.params
+            .get("item")
+            .and_then(|item| item.get("arguments"))
+            .or_else(|| self.params.get("arguments"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +130,30 @@ mod tests {
         assert_eq!(event.thread_id.as_deref(), Some("thread-1"));
         assert_eq!(event.turn_id.as_deref(), Some("turn-1"));
         assert_eq!(event.item_id.as_deref(), Some("item-1"));
+    }
+
+    #[test]
+    fn extracts_tool_metadata_from_nested_item() {
+        let event = AppServerEvent::from(JsonRpcNotification {
+            jsonrpc: "2.0".to_string(),
+            method: "item/completed".to_string(),
+            params: serde_json::json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id": "item-1",
+                    "type": "function_call",
+                    "toolName": "Read",
+                    "arguments": { "path": "README.md" }
+                }
+            }),
+        });
+
+        assert_eq!(event.item_type(), Some("function_call"));
+        assert_eq!(event.tool_name(), Some("Read"));
+        assert_eq!(
+            event.tool_arguments_json(),
+            Some(&serde_json::json!({ "path": "README.md" }))
+        );
     }
 }

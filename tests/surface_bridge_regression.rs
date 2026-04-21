@@ -355,12 +355,12 @@ async fn regression_tier1_task_lifecycle() {
     let t = test_thread();
     let created = map_task_create(
         TaskCreateRequest { description: "test".into(), instructions: None, cwd: None },
-        &t, &reg,
+        &t, None, &reg,
     ).await;
     assert_eq!(created.status, JobStatus::Queued);
     assert!(map_task_get(&created.job_id, &reg).await.is_some());
     assert_eq!(map_task_list(&reg).await.len(), 1);
-    let stopped = map_task_stop(&created.job_id, &reg).await.unwrap();
+    let stopped = map_task_stop(&created.job_id, None, &reg).await.unwrap();
     assert_eq!(stopped.status, JobStatus::Cancelled);
 }
 
@@ -370,13 +370,13 @@ async fn regression_tier1_agent_delegation() {
     let t = test_thread();
     let allowed = map_agent_spawn(
         AgentSpawnRequest { task: "x".into(), cwd: None },
-        &t, &DelegationPolicy::ExplicitOnly, &reg,
+        &t, &DelegationPolicy::ExplicitOnly, None, &reg,
     ).await;
     assert!(allowed.allowed);
 
     let denied = map_agent_spawn(
         AgentSpawnRequest { task: "y".into(), cwd: None },
-        &t, &DelegationPolicy::Never, &reg,
+        &t, &DelegationPolicy::Never, None, &reg,
     ).await;
     assert!(!denied.allowed);
 }
@@ -386,7 +386,7 @@ async fn regression_tier1_review() {
     let reg = JobRegistry::default();
     let r = map_code_review(
         ReviewRequest { scope: None, files: None, instructions: None },
-        &reg,
+        None, &reg,
     ).await;
     let cancelled = map_review_cancel(&r.job_id, &reg).await.unwrap();
     assert_eq!(cancelled.status, JobStatus::Cancelled);
@@ -430,9 +430,25 @@ fn regression_tier2_rewind() {
     assert_eq!(r.method, "thread/rollback");
 }
 
-#[test]
-fn regression_tier2_resume() {
-    let r = map_resume("t1");
+#[tokio::test]
+async fn regression_tier2_resume() {
+    let sessions = claude_codex_proxy::state::StateStore::default();
+    sessions.insert_session(claude_codex_proxy::app_server::BridgeSession {
+        bridge_session_id: "integration-session".to_string(),
+        claude_session_id: None,
+        thread: test_thread(),
+        transport: claude_codex_proxy::app_server::TransportKind::Stdio,
+        operation_mode: claude_codex_proxy::surfaces::OperationMode::AutoHybrid,
+        api_stability: claude_codex_proxy::app_server::ApiStability::Stable,
+        delegation_policy: claude_codex_proxy::app_server::DelegationPolicy::ExplicitOnly,
+        active_guidance_layers: Vec::new(),
+        active_skills: Vec::new(),
+        active_jobs: Vec::new(),
+        state_version: 1,
+    }).await;
+    let r = map_resume("integration-thread", &JobRegistry::default(), &sessions)
+        .await
+        .unwrap();
     assert_eq!(r.strategy, MappingStrategy::MediatedNative);
 }
 
