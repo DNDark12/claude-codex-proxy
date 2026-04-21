@@ -20,6 +20,20 @@ use crate::translation::tool_runtime::{
     log_tool_decision, ToolCallAssembler, ToolCallDecision, ToolRegistry,
 };
 
+struct OpenAIToolChunkContext {
+    chunk_id: String,
+    model: String,
+    created: i64,
+    trace_id: String,
+}
+
+struct OpenAIToolChunkState<'a> {
+    tool_call_indices: &'a mut HashMap<String, usize>,
+    next_tool_index: &'a mut usize,
+    has_valid_tool_calls: &'a mut bool,
+    has_content: &'a mut bool,
+}
+
 pub fn stream_codex_to_openai(
     response: Response,
     model: String,
@@ -33,6 +47,12 @@ pub fn stream_codex_to_openai(
 
         let chunk_id = format!("chatcmpl-{}", Uuid::new_v4());
         let created = Utc::now().timestamp();
+        let tool_chunk_context = OpenAIToolChunkContext {
+            chunk_id: chunk_id.clone(),
+            model: model.clone(),
+            created,
+            trace_id: trace_id.clone(),
+        };
 
         let role_chunk = OpenAIChunk {
             id: chunk_id.clone(),
@@ -106,14 +126,13 @@ pub fn stream_codex_to_openai(
 
                     for chunk in materialize_openai_tool_decision(
                         &decision,
-                        &chunk_id,
-                        &model,
-                        created,
-                        &trace_id,
-                        &mut tool_call_indices,
-                        &mut next_tool_index,
-                        &mut has_valid_tool_calls,
-                        &mut has_content,
+                        &tool_chunk_context,
+                        OpenAIToolChunkState {
+                            tool_call_indices: &mut tool_call_indices,
+                            next_tool_index: &mut next_tool_index,
+                            has_valid_tool_calls: &mut has_valid_tool_calls,
+                            has_content: &mut has_content,
+                        },
                     ) {
                         yield Ok(Event::default().data(chunk));
                     }
@@ -166,14 +185,13 @@ pub fn stream_codex_to_openai(
 
             for chunk in materialize_openai_tool_decision(
                 &decision,
-                &chunk_id,
-                &model,
-                created,
-                &trace_id,
-                &mut tool_call_indices,
-                &mut next_tool_index,
-                &mut has_valid_tool_calls,
-                &mut has_content,
+                &tool_chunk_context,
+                OpenAIToolChunkState {
+                    tool_call_indices: &mut tool_call_indices,
+                    next_tool_index: &mut next_tool_index,
+                    has_valid_tool_calls: &mut has_valid_tool_calls,
+                    has_content: &mut has_content,
+                },
             ) {
                 yield Ok(Event::default().data(chunk));
             }
@@ -314,38 +332,33 @@ pub async fn collect_codex_to_openai(
 
 fn materialize_openai_tool_decision(
     decision: &ToolCallDecision,
-    chunk_id: &str,
-    model: &str,
-    created: i64,
-    trace_id: &str,
-    tool_call_indices: &mut HashMap<String, usize>,
-    next_tool_index: &mut usize,
-    has_valid_tool_calls: &mut bool,
-    has_content: &mut bool,
+    context: &OpenAIToolChunkContext,
+    state: OpenAIToolChunkState<'_>,
 ) -> Vec<String> {
     if decision.emit {
-        let idx = *tool_call_indices
+        let idx = *state
+            .tool_call_indices
             .entry(decision.call_id.clone())
             .or_insert_with(|| {
-                let current = *next_tool_index;
-                *next_tool_index += 1;
+                let current = *state.next_tool_index;
+                *state.next_tool_index += 1;
                 current
             });
 
         let start_chunk = make_tool_start_chunk(
-            chunk_id,
-            model,
-            created,
+            &context.chunk_id,
+            &context.model,
+            context.created,
             idx,
             &decision.call_id,
             &decision.display_tool_name,
         );
 
         let args_chunk = OpenAIChunk {
-            id: chunk_id.to_string(),
+            id: context.chunk_id.clone(),
             object: "chat.completion.chunk".to_string(),
-            created,
-            model: model.to_string(),
+            created: context.created,
+            model: context.model.clone(),
             choices: vec![OpenAIChunkChoice {
                 index: 0,
                 delta: OpenAIChunkDelta {
@@ -366,8 +379,8 @@ fn materialize_openai_tool_decision(
             usage: None,
         };
 
-        *has_valid_tool_calls = true;
-        *has_content = true;
+        *state.has_valid_tool_calls = true;
+        *state.has_content = true;
 
         return vec![
             serde_json::to_string(&start_chunk).unwrap_or_default(),
@@ -375,12 +388,12 @@ fn materialize_openai_tool_decision(
         ];
     }
 
-    *has_content = true;
+    *state.has_content = true;
     vec![make_text_chunk(
-        chunk_id,
-        model,
-        &tool_skip_diagnostic_text(decision, trace_id),
-        created,
+        &context.chunk_id,
+        &context.model,
+        &tool_skip_diagnostic_text(decision, &context.trace_id),
+        context.created,
     )]
 }
 

@@ -2,30 +2,25 @@ use anyhow::Result;
 use clap::Parser;
 use env_logger::Env;
 
-mod domain;
-mod proxy;
-mod routes;
-mod skills;
-mod translation;
-
-use crate::proxy::codex_client::CodexClient;
-use crate::routes::build_routes;
-use crate::skills::load_skill_registry;
+use claude_codex_proxy::app_server;
+use claude_codex_proxy::app_server::AppServerClient;
+use claude_codex_proxy::cli;
+use claude_codex_proxy::cli::{CliCommand, RuntimeArgs};
+use claude_codex_proxy::jobs::JobRegistry;
+use claude_codex_proxy::proxy::codex_client::CodexClient;
+use claude_codex_proxy::routes::{build_routes, RouteBuildOptions};
+use claude_codex_proxy::skills::load_skill_registry;
+use claude_codex_proxy::state::StateStore;
+use claude_codex_proxy::surfaces::{CompatibilityMatrix, OperationMode, SurfaceRegistry};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Port to listen on
-    #[arg(short, long)]
-    port: Option<u16>,
+    #[command(subcommand)]
+    command: Option<CliCommand>,
 
-    /// Path to Codex auth.json file
-    #[arg(long)]
-    auth_path: Option<String>,
-
-    /// Path to a generated skill registry json file
-    #[arg(long)]
-    skills_registry_path: Option<String>,
+    #[command(flatten)]
+    runtime: RuntimeArgs,
 }
 
 #[tokio::main]
@@ -33,65 +28,108 @@ async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let args = Args::parse();
-    let port = resolve_port(args.port);
-    let auth_path = resolve_auth_path(args.auth_path);
-    let skills_registry_path = resolve_skills_registry_path(args.skills_registry_path);
-    let skill_registry = load_optional_skill_registry(skills_registry_path.as_deref());
 
-    let client = CodexClient::from_auth_path(&auth_path).await?;
-    let routes = build_routes(client, skill_registry);
+    match args.command {
+        Some(CliCommand::Setup(setup_args)) => {
+            let report = cli::setup::run_setup(&setup_args).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Some(CliCommand::Doctor(doctor_args)) => {
+            let report = cli::doctor::run_doctor(&doctor_args).await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+        Some(CliCommand::Env(env_args)) => {
+            println!("{}", cli::env::render_env(&env_args).await?);
+            Ok(())
+        }
+        Some(CliCommand::Serve(runtime_args)) => serve(runtime_args).await,
+        None => serve(args.runtime).await,
+    }
+}
 
-    log::info!("Proxy listening on http://0.0.0.0:{port}");
-    log::info!("Using auth path: {auth_path}");
-    match &skills_registry_path {
+async fn serve(runtime_args: RuntimeArgs) -> Result<()> {
+    let runtime = runtime_args.resolve();
+    let skill_registry = load_optional_skill_registry(runtime.skills_registry_path.as_deref());
+    let surface_registry = SurfaceRegistry::new();
+    let compatibility_matrix = CompatibilityMatrix::new(&surface_registry);
+    let job_registry = JobRegistry::default();
+    let state_store = StateStore::default();
+
+    let app_server = initialize_app_server(&runtime).await?;
+    let legacy_client = initialize_legacy_client(&runtime).await?;
+
+    let routes = build_routes(RouteBuildOptions {
+        client: legacy_client,
+        app_server,
+        skill_registry,
+        surface_registry,
+        compatibility_matrix,
+        job_registry,
+        state_store,
+        operation_mode: runtime.operation_mode,
+        api_stability: runtime.api_stability,
+        delegation_policy: runtime.delegation_policy,
+    });
+
+    log::info!("Proxy listening on http://0.0.0.0:{}", runtime.port);
+    log::info!("Operation mode: {:?}", runtime.operation_mode);
+    log::info!("Using auth path: {}", runtime.auth_path);
+    match &runtime.skills_registry_path {
         Some(path) => log::info!("Using skills registry path: {path}"),
         None => log::info!("Skills registry disabled"),
     }
 
-    warp::serve(routes).run(([0, 0, 0, 0], port)).await;
+    warp::serve(routes)
+        .try_bind(([0, 0, 0, 0], runtime.port))
+        .await;
     Ok(())
 }
 
-fn resolve_port(cli_port: Option<u16>) -> u16 {
-    if let Some(port) = cli_port {
-        return port;
+async fn initialize_app_server(runtime: &cli::RuntimeConfig) -> Result<Option<AppServerClient>> {
+    if matches!(runtime.operation_mode, OperationMode::ResponsesOnly) {
+        return Ok(None);
     }
 
-    if let Ok(raw) = std::env::var("PROXY_PORT") {
-        match raw.parse::<u16>() {
-            Ok(port) => return port,
-            Err(_) => log::warn!("Invalid PROXY_PORT='{raw}', fallback to 8080"),
+    match AppServerClient::connect(app_server::AppServerConnectOptions {
+        api_stability: runtime.api_stability,
+        ..app_server::AppServerConnectOptions::default()
+    })
+    .await
+    {
+        Ok(client) => {
+            log::info!(
+                "App-server handshake complete: {}",
+                client.handshake().user_agent
+            );
+            Ok(Some(client))
         }
-    }
-
-    8080
-}
-
-fn resolve_auth_path(cli_auth_path: Option<String>) -> String {
-    if let Some(path) = cli_auth_path {
-        return path;
-    }
-
-    if let Ok(path) = std::env::var("PROXY_AUTH_PATH") {
-        if !path.trim().is_empty() {
-            return path;
+        Err(error) if matches!(runtime.operation_mode, OperationMode::AutoHybrid) => {
+            log::warn!("App-server unavailable, continuing in degraded mode: {error}");
+            Ok(None)
         }
+        Err(error) => Err(error),
     }
-
-    "~/.codex/auth.json".to_string()
 }
 
-fn resolve_skills_registry_path(cli_registry_path: Option<String>) -> Option<String> {
-    if let Some(path) = cli_registry_path.filter(|v| !v.trim().is_empty()) {
-        return Some(path);
+async fn initialize_legacy_client(runtime: &cli::RuntimeConfig) -> Result<Option<CodexClient>> {
+    match CodexClient::from_auth_path(&runtime.auth_path).await {
+        Ok(client) => Ok(Some(client)),
+        Err(error)
+            if matches!(
+                runtime.operation_mode,
+                OperationMode::AutoHybrid | OperationMode::StrictAppServer
+            ) =>
+        {
+            log::warn!("Responses API fallback unavailable: {error}");
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
-
-    std::env::var("PROXY_SKILLS_REGISTRY_PATH")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
 }
 
-fn load_optional_skill_registry(path: Option<&str>) -> Option<crate::skills::SkillRegistry> {
+fn load_optional_skill_registry(path: Option<&str>) -> Option<claude_codex_proxy::skills::SkillRegistry> {
     let path = path?;
     match load_skill_registry(path) {
         Ok(registry) => {

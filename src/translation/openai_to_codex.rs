@@ -2,6 +2,7 @@ use crate::domain::codex::{
     CodexContentPart, CodexInputItem, CodexMessageContent, CodexResponsesRequest, CodexTextFormat,
     CodexTextFormatType,
 };
+use crate::model_profiles::resolve_model_profile;
 use crate::domain::openai::{
     ChatCompletionsRequest, OpenAIContent, OpenAIContentPart, OpenAIImageUrl,
 };
@@ -10,6 +11,7 @@ use crate::translation::tool_format::{
 };
 
 pub fn translate_openai_to_codex(req: &ChatCompletionsRequest) -> CodexResponsesRequest {
+    let resolved_model = resolve_model_profile(&req.model);
     let instructions = build_instructions(req);
     let mut input: Vec<CodexInputItem> = Vec::new();
 
@@ -102,14 +104,15 @@ pub fn translate_openai_to_codex(req: &ChatCompletionsRequest) -> CodexResponses
         .and_then(openai_tool_choice_to_codex);
 
     let text = map_response_format(req);
+    let reasoning_effort = effective_openai_reasoning_effort(req);
 
     CodexResponsesRequest {
-        model: req.model.clone(),
+        model: resolved_model.backend_model,
         instructions,
         input,
         tools,
         tool_choice,
-        reasoning: req.reasoning_effort.as_ref().map(|effort| {
+        reasoning: reasoning_effort.as_ref().map(|effort| {
             serde_json::json!({
                 "summary": "auto",
                 "effort": effort
@@ -119,6 +122,12 @@ pub fn translate_openai_to_codex(req: &ChatCompletionsRequest) -> CodexResponses
         stream: true,
         text,
     }
+}
+
+pub fn effective_openai_reasoning_effort(req: &ChatCompletionsRequest) -> Option<String> {
+    req.reasoning_effort
+        .clone()
+        .or_else(|| resolve_model_profile(&req.model).effort)
 }
 
 fn build_instructions(req: &ChatCompletionsRequest) -> String {
@@ -218,5 +227,74 @@ fn map_response_format(req: &ChatCompletionsRequest) -> Option<CodexTextFormat> 
             })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::domain::openai::{OpenAIMessage, OpenAIResponseFormat};
+
+    #[test]
+    fn maps_high_reasoning_model_alias_to_base_model_and_effort() {
+        let req = ChatCompletionsRequest {
+            model: "gpt-5.2-codex-high".to_string(),
+            messages: vec![OpenAIMessage {
+                role: "user".to_string(),
+                content: Some(OpenAIContent::Text("hi".to_string())),
+                tool_calls: None,
+                function_call: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            stream: Some(false),
+            tools: None,
+            tool_choice: None,
+            functions: None,
+            reasoning_effort: None,
+            response_format: None,
+        };
+
+        let out = translate_openai_to_codex(&req);
+
+        assert_eq!(out.model, "gpt-5.2-codex");
+        assert_eq!(out.reasoning, Some(json!({
+            "summary": "auto",
+            "effort": "high"
+        })));
+    }
+
+    #[test]
+    fn preserves_explicit_openai_reasoning_effort_over_model_alias() {
+        let req = ChatCompletionsRequest {
+            model: "gpt-5.2-codex-xhigh".to_string(),
+            messages: vec![OpenAIMessage {
+                role: "user".to_string(),
+                content: Some(OpenAIContent::Text("hi".to_string())),
+                tool_calls: None,
+                function_call: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            stream: Some(false),
+            tools: None,
+            tool_choice: None,
+            functions: None,
+            reasoning_effort: Some("low".to_string()),
+            response_format: Some(OpenAIResponseFormat {
+                format_type: "text".to_string(),
+                json_schema: None,
+            }),
+        };
+
+        let out = translate_openai_to_codex(&req);
+
+        assert_eq!(out.model, "gpt-5.2-codex");
+        assert_eq!(out.reasoning, Some(json!({
+            "summary": "auto",
+            "effort": "low"
+        })));
     }
 }

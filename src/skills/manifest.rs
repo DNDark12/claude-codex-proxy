@@ -8,7 +8,7 @@ pub enum SkillMergeMode {
 }
 
 impl SkillMergeMode {
-    pub fn from_str(value: Option<&str>) -> Self {
+    pub fn parse(value: Option<&str>) -> Self {
         match value.map(|v| v.trim().to_ascii_lowercase()) {
             Some(v) if v == "append" => Self::Append,
             Some(v) if v == "replace" => Self::Replace,

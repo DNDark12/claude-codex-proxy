@@ -34,7 +34,7 @@ impl SkillRegistry {
                     .reference_bundle_path
                     .as_deref()
                     .map(|path| resolve_artifact_path(base_dir, path)),
-                merge_mode: SkillMergeMode::from_str(raw_skill.merge_mode.as_deref()),
+                merge_mode: SkillMergeMode::parse(raw_skill.merge_mode.as_deref()),
                 tool_aliases: raw_skill.tool_aliases,
             };
 
@@ -60,6 +60,10 @@ impl SkillRegistry {
 
     pub fn len(&self) -> usize {
         self.skills_by_marker.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.skills_by_marker.is_empty()
     }
 }
 

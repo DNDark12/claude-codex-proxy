@@ -49,19 +49,16 @@ impl CodexEventExtractor {
 
         match event_type.as_str() {
             "response.output_text.delta" => {
-                out.text_delta = payload
-                    .get("delta")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-                    .or_else(|| payload.as_str().map(ToString::to_string));
+                // NOTE: Do NOT extract text from "response.output_text.delta" —
+                // it contains the same text that is also streamed via
+                // "response.output_item.delta" for text blocks. Extracting both
+                // causes the client to see duplicated text.
             }
-            "response.output_text.done" => {
-                out.text_delta = payload
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-                    .or_else(|| payload.as_str().map(ToString::to_string));
-            }
+            // NOTE: Do NOT extract text from "response.output_text.done" —
+            // it carries the full accumulated text which we already received
+            // via the preceding ".delta" events. Extracting it would duplicate
+            // the entire response.
+            "response.output_text.done" => {}
             "response.output_item.delta" => {
                 out.text_delta = payload
                     .get("delta")
@@ -83,13 +80,8 @@ impl CodexEventExtractor {
                     .map(ToString::to_string)
                     .or_else(|| payload.as_str().map(ToString::to_string));
             }
-            "response.reasoning_summary_text.done" => {
-                out.reasoning_delta = payload
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string)
-                    .or_else(|| payload.as_str().map(ToString::to_string));
-            }
+            // Same as output_text.done — skip to avoid duplicating reasoning text.
+            "response.reasoning_summary_text.done" => {}
             "response.output_item.added" => {
                 if let Some(item) = payload.get("item") {
                     if item.get("type").and_then(Value::as_str) == Some("function_call") {
@@ -362,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn extracts_text_from_output_text_done() {
+    fn output_text_done_does_not_extract_text_to_avoid_duplication() {
         let mut extractor = CodexEventExtractor::new();
         let event = extractor.extract(ParsedSseEvent::Json {
             event: Some("response.output_text.done".to_string()),
@@ -371,7 +363,9 @@ mod tests {
             }),
         });
 
-        assert_eq!(event.text_delta.as_deref(), Some("complete"));
+        // .done events must NOT set text_delta — the deltas already covered
+        // all text and re-emitting the full text would duplicate the response.
+        assert_eq!(event.text_delta, None);
     }
 
     #[test]

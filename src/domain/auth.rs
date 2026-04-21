@@ -23,8 +23,8 @@ impl AuthData {
         self.tokens
             .as_ref()
             .map(|v| v.access_token.as_str())
-            .or_else(|| self.access_token.as_deref())
-            .or_else(|| self.api_key.as_deref())
+            .or(self.access_token.as_deref())
+            .or(self.api_key.as_deref())
     }
 
     pub fn account_id(&self) -> Option<&str> {

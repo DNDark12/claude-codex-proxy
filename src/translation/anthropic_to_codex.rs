@@ -8,6 +8,7 @@ use crate::domain::anthropic::{
 use crate::domain::codex::{
     CodexContentPart, CodexInputItem, CodexMessageContent, CodexResponsesRequest,
 };
+use crate::model_profiles::resolve_model_profile;
 use crate::skills::{ReferencePayload, ResolvedSkillContext, SkillMergeMode};
 use crate::translation::tool_format::{anthropic_tool_choice_to_codex, anthropic_tools_to_codex};
 
@@ -15,6 +16,7 @@ pub fn translate_anthropic_to_codex(
     req: &AnthropicMessagesRequest,
     bridge: Option<&ResolvedSkillContext>,
 ) -> CodexResponsesRequest {
+    let resolved_model = resolve_model_profile(&req.model);
     let mut input: Vec<CodexInputItem> = Vec::new();
 
     for message in &req.messages {
@@ -54,12 +56,12 @@ pub fn translate_anthropic_to_codex(
         .and_then(|choice| anthropic_tool_choice_to_codex(choice, bridge.map(|v| &v.tool_aliases)));
 
     CodexResponsesRequest {
-        model: req.model.clone(),
+        model: resolved_model.backend_model,
         instructions: build_instructions(req, bridge),
         input,
         tools,
         tool_choice,
-        reasoning: req.thinking.as_ref().and_then(map_thinking_to_reasoning),
+        reasoning: effective_anthropic_reasoning_effort(req).map(reasoning_payload),
         store: false,
         stream: true,
         text: None,
@@ -321,27 +323,41 @@ fn render_reference_block(references: &[ReferencePayload]) -> String {
     rendered.trim().to_string()
 }
 
-fn map_thinking_to_reasoning(thinking: &Value) -> Option<Value> {
+pub fn effective_anthropic_reasoning_effort(req: &AnthropicMessagesRequest) -> Option<String> {
+    req.thinking
+        .as_ref()
+        .and_then(map_thinking_to_effort)
+        .or_else(|| resolve_model_profile(&req.model).effort)
+}
+
+fn reasoning_payload(effort: String) -> Value {
+    json!({
+        "summary": "auto",
+        "effort": effort
+    })
+}
+
+fn map_thinking_to_effort(thinking: &Value) -> Option<String> {
     let obj = thinking.as_object()?;
     let budget = obj
         .get("budget_tokens")
         .and_then(Value::as_i64)
         .or_else(|| obj.get("budgetTokens").and_then(Value::as_i64));
 
-    let effort = budget.map(|tokens| {
-        if tokens >= 16000 {
-            "high"
-        } else if tokens >= 4000 {
-            "medium"
-        } else {
-            "low"
-        }
-    });
-
-    Some(json!({
-        "summary": "auto",
-        "effort": effort.unwrap_or("medium")
-    }))
+    Some(
+        budget
+            .map(|tokens| {
+                if tokens >= 16000 {
+                    "high"
+                } else if tokens >= 4000 {
+                    "medium"
+                } else {
+                    "low"
+                }
+            })
+            .unwrap_or("medium")
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -504,5 +520,53 @@ mod tests {
             item,
             CodexInputItem::FunctionCall { name, .. } if name == "read_file"
         )));
+    }
+
+    #[test]
+    fn maps_high_reasoning_model_alias_to_base_model() {
+        let req = AnthropicMessagesRequest {
+            model: "gpt-5.2-codex-high".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("hi".to_string()),
+            }],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: Some(false),
+            thinking: None,
+        };
+
+        let out = translate_anthropic_to_codex(&req, None);
+
+        assert_eq!(out.model, "gpt-5.2-codex");
+        assert_eq!(out.reasoning, Some(json!({
+            "summary": "auto",
+            "effort": "high"
+        })));
+    }
+
+    #[test]
+    fn preserves_explicit_thinking_budget_over_model_alias() {
+        let req = AnthropicMessagesRequest {
+            model: "gpt-5.2-codex-xhigh".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: AnthropicContent::Text("hi".to_string()),
+            }],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: Some(false),
+            thinking: Some(json!({"budget_tokens": 1000})),
+        };
+
+        let out = translate_anthropic_to_codex(&req, None);
+
+        assert_eq!(out.model, "gpt-5.2-codex");
+        assert_eq!(out.reasoning, Some(json!({
+            "summary": "auto",
+            "effort": "low"
+        })));
     }
 }
