@@ -79,7 +79,7 @@ Typical output:
 ```bash
 export ANTHROPIC_API_KEY='dummy'
 export ANTHROPIC_BASE_URL='http://127.0.0.1:8080'
-export ANTHROPIC_MODEL='gpt-5.2-codex'
+export ANTHROPIC_MODEL='gpt-5.3-codex-xhigh'
 ```
 
 Apply them in your shell:
@@ -144,6 +144,9 @@ Translates Anthropic/OpenAI requests to Codex Responses API via `chatgpt.com`. U
 | `--delegation-policy` | — | `explicit-only` | Subagent spawn policy |
 | `RUST_LOG` | — | `info` | Log level |
 | `DISABLE_TOOL_FALLBACK` | — | `false` | Disable tool-stripping retry |
+| `APP_SERVER_TURN_TIMEOUT_SECS` | — | `300` | Max wait for non-streaming turns |
+| `CLAUDE_CODEX_PROXY_MAX_SESSIONS` | — | `256` | Max concurrent session entries |
+| `CLAUDE_CODEX_PROXY_ENABLE_THREAD_REUSE` | — | `false` | Experimental: reuse threads for follow-up turns |
 
 ## Available Endpoints
 
@@ -173,8 +176,6 @@ The proxy maps Claude Code surfaces across 6 tiers:
 | 3 | Cron*, Monitor, ToolSearch, WebFetch, WebSearch | `mediated_native` / `workflow_emulated` |
 | 4 | /init, /memory, /mcp, /plugin, NotebookRead | `workflow_emulated` |
 | 5 | Platform-specific, host UX | `unsupported_explicit` |
-
-See `docs/claude-codex-capability-bridge-plan.md` for the full architecture plan and `docs/surface-bridge-tasks.md` for implementation status.
 
 ## Security Notes
 
