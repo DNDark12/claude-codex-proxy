@@ -16,22 +16,22 @@ An app-server-first Rust proxy that maps Claude Code surfaces onto Codex runtime
 ### Module layout
 - `src/app_server/` — JSON-RPC client, stdio transport, Thread/Turn/Item state, handshake, schema
 - `src/surfaces/` — Surface model, classifier, registry, compatibility matrix
-- `src/mapping/` — Surface-to-Codex mapping: tools, tasks, subagents, review, planning, workspace, scheduling, guidance, approvals, interaction
-- `src/jobs/` — Background job tracking, scheduler, review/rescue workflows
+- `src/jobs/` — JobExecutor (in-process app-server runtime), background job tracking, registry
 - `src/state/` — Session state, guidance layers, permission profiles
 - `src/adapters/` — Claude-format output synthesis with bridge metadata
 - `src/observability/` — Degradation telemetry and structured tracing
 - `src/cli/` — setup/doctor/env subcommands
 - `src/domain/` — Serde types: anthropic.rs, openai.rs, codex.rs, auth.rs
 - `src/proxy/` — Legacy Responses API client (fallback path)
-- `src/routes/` — Warp HTTP handlers + bridge diagnostic endpoints
-- `src/translation/` — Protocol bridging (Anthropic↔Codex↔OpenAI)
+- `src/routes/` — Warp HTTP handlers, rate-limiting guards, and DispatchPlanner
+- `src/translation/` — Protocol bridging (Anthropic↔Codex↔OpenAI) with tool-call assembler
 - `src/skills/` — Custom skill bridge (marker detection, instruction injection)
 
 ### Request Flow (app-server mode)
 ```
-Client → Warp handler → Surface Classifier → Mapping Decision
-  → App-server JSON-RPC (Thread/Turn/Item) → Event Translator → Claude output
+Client → Warp handler → DispatchPlanner (Surface Classifier)
+  → App-server JSON-RPC via JobExecutor (isolated thread/turn handling)
+  → Event Translator (ToolCallAssembler) → Claude / OpenAI output
 ```
 
 ### Key Design Decisions
@@ -39,11 +39,10 @@ Client → Warp handler → Surface Classifier → Mapping Decision
 2. Surface-first: every Claude surface has bucket (runtime_critical/workflow_runtime/host_admin_ux/platform_specific/out_of_scope) + tier (0-5)
 3. State: BridgeThread > BridgeTurn > BridgeItemRef maps 1:1 to app-server primitives
 4. Approval Bridge is Phase 1 foundation — approvalPolicy + sandbox set at thread/start
-5. AskUserQuestion != approval (UserInteractionBridge separates clarification from approval)
-6. Plan mode = mediated_native via item/plan/delta + thread/rollback + thread/fork
-7. Cron* (session-scoped) != /schedule (durable routines) — separate families
+5. Task Completion MVP: The Proxy bypasses rate-limited Responses API by routing eligible traffic to the underlying AppServer with a dedicated `JobExecutor`.
+6. Thread Leasing: Uses a `ThreadPool` and explicit continuation (TaskUpdate, /resume) instead of generic stateless thread reuse.
+7. Plan mode = mediated_native via item/plan/delta + thread/rollback + thread/fork
 8. DelegationPolicy.ExplicitOnly default for subagent spawning
-9. Stable API default; experimental opt-in via --app-server-experimental
 
 ## Build and Run
 
@@ -59,8 +58,9 @@ Config: CLI arg > env var > default. Port 8080. Auth via `codex login` (app-serv
 ## Testing
 
 ```bash
-cargo test                    # all unit + integration tests (125+)
+cargo test                    # all unit + integration tests (160+)
 cargo test -- --ignored       # integration tests requiring live codex app-server
+cargo test --tests --no-run   # Compile checks for integration tests
 cargo clippy                  # lint
 ```
 
@@ -76,5 +76,4 @@ Key test modules: `mapping::tools::tests`, `mapping::approvals::tests`, `mapping
 - Planning: `src/mapping/planning.rs` (plan mode, plan delta events)
 - Workspace: `src/mapping/workspace.rs` (worktree hybrid orchestration, resume, rewind/rollback)
 - Schema: `src/app_server/schema_stable.rs`, `schema_experimental.rs`
-- Plan docs: `docs/claude-codex-capability-bridge-plan.md` (v4-final, frozen)
-- Task tracker: `docs/surface-bridge-tasks.md` (162 tasks, 9 phases)
+- Architecture Docs (Local only): `docs/codex-task-completion-analysis.md` (quota hypotheses) and `docs/superpowers/plans/` (implementation plans)
