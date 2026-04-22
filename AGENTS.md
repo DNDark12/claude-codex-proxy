@@ -16,6 +16,7 @@ An app-server-first Rust proxy that maps Claude Code surfaces onto Codex runtime
 
 ### Module layout
 
+- `src/accounts/` — Multi-account pool: config/state split, JWT parsing, health tracking, auto-discovery, token paste
 - `src/app_server/` — JSON-RPC client, stdio transport, Thread/Turn/Item state, handshake, schema
 - `src/surfaces/` — Surface model, classifier, registry, compatibility matrix
 - `src/jobs/` — JobExecutor (in-process app-server runtime), background job tracking, registry
@@ -25,7 +26,7 @@ An app-server-first Rust proxy that maps Claude Code surfaces onto Codex runtime
 - `src/cli/` — setup/doctor/env subcommands
 - `src/domain/` — Serde types: anthropic.rs, openai.rs, codex.rs, auth.rs
 - `src/proxy/` — Legacy Responses API client (fallback path)
-- `src/routes/` — Warp HTTP handlers, rate-limiting guards, and DispatchPlanner
+- `src/routes/` — Warp HTTP handlers, rate-limiting guards, DispatchPlanner, account API
 - `src/translation/` — Protocol bridging (Anthropic↔Codex↔OpenAI) with tool-call assembler
 - `src/skills/` — Custom skill bridge (marker detection, instruction injection)
 
@@ -68,10 +69,13 @@ cargo test --tests --no-run   # Compile checks for integration tests
 cargo clippy                  # lint
 ```
 
-Key test modules: `mapping::tools::tests`, `mapping::approvals::tests`, `mapping::interaction::tests`, `mapping::tasks::tests`, `mapping::subagents::tests`, `mapping::review::tests`, `mapping::planning::tests`, `mapping::workspace::tests`, `mapping::scheduling::tests`. Integration regression: `tests/surface_bridge_regression.rs`.
+Key test modules: `accounts::auth_store::tests`, `mapping::tools::tests`, `mapping::approvals::tests`, `mapping::interaction::tests`, `mapping::tasks::tests`, `mapping::subagents::tests`, `mapping::review::tests`, `mapping::planning::tests`, `mapping::workspace::tests`, `mapping::scheduling::tests`. Integration regression: `tests/surface_bridge_regression.rs`.
 
 ## Key Files
 
+- Account Pool: `src/accounts/mod.rs` (AccountPool, AccountConfig, AccountRuntimeState, load_pool)
+- Auth Store: `src/accounts/auth_store.rs` (JWT parsing, PlanType, QuotaHealth, discovery, token paste)
+- Account API: `src/routes/api.rs` (list/add/remove/toggle/reset/validate/discover/import)
 - Surface model: `src/surfaces/model.rs` (SurfaceDescriptor, MappingDecision, all enums)
 - Tool mapping: `src/mapping/tools.rs` (Read/Write/Edit/Bash/Glob/Grep/LS + web + notebook)
 - Approval: `src/mapping/approvals.rs` (policy precedence, pause detection, sandbox intent)

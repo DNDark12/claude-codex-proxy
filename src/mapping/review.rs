@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::app_server::UserInput;
-use crate::jobs::{ExecutorRequest, JobExecutor};
-use crate::jobs::model::{JobKind, JobRecord, JobStatus};
+use crate::jobs::model::{unix_timestamp_now, JobKind, JobRecord, JobStatus};
 use crate::jobs::registry::JobRegistry;
+use crate::jobs::{ExecutorRequest, JobExecutor};
 use crate::mapping::tools::ToolWarning;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +62,10 @@ pub async fn map_code_review(
         codex_turn_id: None,
         codex_agent_ids: Vec::new(),
         worktree_path: None,
+        account_id: None,
+        account_auth_path: None,
+        created_at: unix_timestamp_now(),
+        finished_at: None,
         result_summary: Some(review_summary(&request)),
         warnings: Vec::new(),
         error_message: None,
@@ -105,6 +109,10 @@ pub async fn map_security_review(
         codex_turn_id: None,
         codex_agent_ids: Vec::new(),
         worktree_path: None,
+        account_id: None,
+        account_auth_path: None,
+        created_at: unix_timestamp_now(),
+        finished_at: None,
         result_summary: Some(review_summary(&request)),
         warnings: Vec::new(),
         error_message: None,
@@ -128,7 +136,10 @@ pub async fn map_rescue_fix(
         "workflow.rescue_fix",
         JobKind::Rescue,
         review_summary(&request),
-        Some("Investigate the problem, propose a safe fix, and execute the rescue workflow.".to_string()),
+        Some(
+            "Investigate the problem, propose a safe fix, and execute the rescue workflow."
+                .to_string(),
+        ),
         executor,
         registry,
     )
@@ -148,6 +159,10 @@ pub async fn map_rescue_fix(
         codex_turn_id: None,
         codex_agent_ids: Vec::new(),
         worktree_path: None,
+        account_id: None,
+        account_auth_path: None,
+        created_at: unix_timestamp_now(),
+        finished_at: None,
         result_summary: Some(review_summary(&request)),
         warnings: Vec::new(),
         error_message: None,
@@ -182,6 +197,10 @@ async fn start_review_job(
             model: "gpt-5.4".to_string(),
             developer_instructions,
             input: vec![UserInput::Text { text: prompt }],
+            existing_thread_id: None,
+            client_session_id: None,
+            account_id: None,
+            account_auth_path: None,
         })
         .await
         .ok()?;
@@ -243,10 +262,15 @@ mod tests {
     async fn code_review_lifecycle() {
         let registry = JobRegistry::default();
         let result = map_code_review(
-            ReviewRequest { scope: Some("all".to_string()), files: None, instructions: None },
+            ReviewRequest {
+                scope: Some("all".to_string()),
+                files: None,
+                instructions: None,
+            },
             None,
             &registry,
-        ).await;
+        )
+        .await;
         assert_eq!(result.status, JobStatus::Queued);
 
         let status = map_review_status(&result.job_id, &registry).await.unwrap();
@@ -260,10 +284,15 @@ mod tests {
     async fn security_review_creates_job() {
         let registry = JobRegistry::default();
         let result = map_security_review(
-            ReviewRequest { scope: None, files: None, instructions: None },
+            ReviewRequest {
+                scope: None,
+                files: None,
+                instructions: None,
+            },
             None,
             &registry,
-        ).await;
+        )
+        .await;
         assert!(!result.job_id.is_empty());
     }
 
@@ -271,10 +300,15 @@ mod tests {
     async fn rescue_fix_creates_rescue_job() {
         let registry = JobRegistry::default();
         let result = map_rescue_fix(
-            ReviewRequest { scope: None, files: None, instructions: None },
+            ReviewRequest {
+                scope: None,
+                files: None,
+                instructions: None,
+            },
             None,
             &registry,
-        ).await;
+        )
+        .await;
         let job = registry.get(&result.job_id).await.unwrap();
         assert_eq!(job.kind, JobKind::Rescue);
     }
@@ -285,10 +319,15 @@ mod tests {
     async fn rescue_fix_job_supports_fork_association() {
         let registry = JobRegistry::default();
         let result = map_rescue_fix(
-            ReviewRequest { scope: Some("src/".to_string()), files: None, instructions: Some("fix crash".to_string()) },
+            ReviewRequest {
+                scope: Some("src/".to_string()),
+                files: None,
+                instructions: Some("fix crash".to_string()),
+            },
             None,
             &registry,
-        ).await;
+        )
+        .await;
         let mut job = registry.get(&result.job_id).await.unwrap();
         assert_eq!(job.kind, JobKind::Rescue);
 
@@ -298,7 +337,10 @@ mod tests {
         registry.insert(job.clone()).await;
 
         let updated = registry.get(&result.job_id).await.unwrap();
-        assert_eq!(updated.codex_thread_id.as_deref(), Some("forked-thread-123"));
+        assert_eq!(
+            updated.codex_thread_id.as_deref(),
+            Some("forked-thread-123")
+        );
         assert_eq!(updated.status, JobStatus::Running);
     }
 }

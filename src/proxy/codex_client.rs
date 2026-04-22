@@ -42,7 +42,7 @@ impl std::error::Error for UpstreamError {}
 #[derive(Clone)]
 pub struct CodexClient {
     client: Client,
-    auth: AuthData,
+    auth_path: String,
     models_cache: Arc<RwLock<Option<ModelsCache>>>,
 }
 
@@ -54,7 +54,7 @@ struct ModelsCache {
 
 impl CodexClient {
     pub async fn from_auth_path(auth_path: &str) -> Result<Self> {
-        let auth = AuthData::load_from_path(auth_path)?;
+        AuthData::load_from_path(auth_path)?;
         let client = Client::builder()
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .no_proxy()
@@ -63,16 +63,23 @@ impl CodexClient {
 
         Ok(Self {
             client,
-            auth,
+            auth_path: auth_path.to_string(),
             models_cache: Arc::new(RwLock::new(None)),
         })
+    }
+
+    fn load_auth(&self) -> Result<AuthData> {
+        AuthData::load_from_path(&self.auth_path)
     }
 
     pub async fn create_response(
         &self,
         request: &CodexResponsesRequest,
     ) -> std::result::Result<Response, UpstreamError> {
-        let token = self.auth.bearer_token().ok_or_else(|| {
+        let auth = self
+            .load_auth()
+            .map_err(|error| UpstreamError::Transport(error.context("failed to reload auth")))?;
+        let token = auth.bearer_token().ok_or_else(|| {
             UpstreamError::Transport(anyhow::anyhow!("missing bearer token in auth file"))
         })?;
 
@@ -95,7 +102,7 @@ impl CodexClient {
             .header("Authorization", format!("Bearer {token}"))
             .header("session_id", Uuid::new_v4().to_string());
 
-        if let Some(account_id) = self.auth.account_id() {
+        if let Some(account_id) = auth.account_id() {
             builder = builder.header("ChatGPT-Account-Id", account_id);
         }
 
@@ -136,8 +143,10 @@ impl CodexClient {
     }
 
     async fn fetch_models_from_backend(&self) -> Result<Vec<String>> {
-        let token = self
-            .auth
+        let auth = self
+            .load_auth()
+            .context("failed to reload auth before fetching models")?;
+        let token = auth
             .bearer_token()
             .ok_or_else(|| anyhow::anyhow!("missing bearer token in auth file"))?;
 
@@ -148,7 +157,7 @@ impl CodexClient {
             .header("Authorization", format!("Bearer {token}"))
             .header("OpenAI-Beta", "responses=experimental");
 
-        if let Some(account_id) = self.auth.account_id() {
+        if let Some(account_id) = auth.account_id() {
             builder = builder.header("ChatGPT-Account-Id", account_id);
         }
 
@@ -213,4 +222,37 @@ fn extract_models(payload: &Value) -> Vec<String> {
 
     collect(payload, &mut out);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_client_reloads_auth_file_contents() {
+        let dir = std::env::temp_dir().join(format!("codex-client-auth-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let auth_path = dir.join("auth.json");
+        std::fs::write(
+            &auth_path,
+            r#"{"tokens":{"access_token":"token-a","account_id":"acc-a","refresh_token":"rt-a"}}"#,
+        )
+        .unwrap();
+
+        let client = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(CodexClient::from_auth_path(auth_path.to_str().unwrap()))
+            .unwrap();
+        std::fs::write(
+            &auth_path,
+            r#"{"tokens":{"access_token":"token-b","account_id":"acc-b","refresh_token":"rt-b"}}"#,
+        )
+        .unwrap();
+
+        let auth = client.load_auth().unwrap();
+        assert_eq!(auth.bearer_token(), Some("token-b"));
+        assert_eq!(auth.account_id(), Some("acc-b"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

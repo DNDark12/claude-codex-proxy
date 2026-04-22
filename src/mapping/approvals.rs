@@ -115,7 +115,9 @@ pub fn detect_approval_pause(event: &AppServerEvent) -> Option<ApprovalPauseInfo
         }
     }
     // Also detect via turn status in turn events
-    if event.kind == AppServerEventKind::TurnStarted || event.kind == AppServerEventKind::TurnCompleted {
+    if event.kind == AppServerEventKind::TurnStarted
+        || event.kind == AppServerEventKind::TurnCompleted
+    {
         if let Some(status) = event
             .params
             .get("status")
@@ -202,24 +204,22 @@ pub fn translate_sandbox_intent(
     };
 
     // Clamp to allowed if requirements restrict
-    let policy = if let Some(allowed) =
-        requirements.and_then(|r| r.allowed_approval_policies.as_ref())
-    {
-        if allowed.contains(&policy) {
-            policy
+    let policy =
+        if let Some(allowed) = requirements.and_then(|r| r.allowed_approval_policies.as_ref()) {
+            if allowed.contains(&policy) {
+                policy
+            } else {
+                // Fall back to most restrictive allowed
+                *allowed
+                    .iter()
+                    .max_by_key(|p| approval_rank(**p))
+                    .unwrap_or(&ApprovalPolicy::Untrusted)
+            }
         } else {
-            // Fall back to most restrictive allowed
-            *allowed
-                .iter()
-                .max_by_key(|p| approval_rank(**p))
-                .unwrap_or(&ApprovalPolicy::Untrusted)
-        }
-    } else {
-        policy
-    };
+            policy
+        };
 
-    let sandbox = if let Some(allowed) =
-        requirements.and_then(|r| r.allowed_sandbox_modes.as_ref())
+    let sandbox = if let Some(allowed) = requirements.and_then(|r| r.allowed_sandbox_modes.as_ref())
     {
         if allowed.contains(&sandbox) {
             sandbox
@@ -358,8 +358,7 @@ mod tests {
         assert_eq!(v["decision"], "accept");
         let v = ApprovalResponse::Deny.to_server_value();
         assert_eq!(v["decision"], "decline");
-        let v = ApprovalResponse::AllowAlways
-            .to_server_value_for_method("execCommandApproval");
+        let v = ApprovalResponse::AllowAlways.to_server_value_for_method("execCommandApproval");
         assert_eq!(v["decision"], "approved_for_session");
     }
 }

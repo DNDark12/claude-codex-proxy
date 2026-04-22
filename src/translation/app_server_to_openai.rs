@@ -5,10 +5,14 @@ use warp::sse::Event;
 use crate::app_server::{AppServerEvent, AppServerEventKind};
 use crate::domain::openai::{
     ChatCompletionsResponse, OpenAIChoice, OpenAIChunk, OpenAIChunkChoice, OpenAIChunkDelta,
-    OpenAIChunkToolCall, OpenAIChunkToolFunction, OpenAIResponseMessage, OpenAIResponseToolCall,
-    OpenAIUsage, OpenAIFunctionCall,
+    OpenAIChunkToolCall, OpenAIChunkToolFunction, OpenAIFunctionCall, OpenAIResponseMessage,
+    OpenAIResponseToolCall, OpenAIUsage,
 };
 use crate::translation::tool_runtime::{ToolCallAssembler, ToolRegistry};
+
+fn error_text(message: &str) -> String {
+    format!("[Error] {message}")
+}
 
 pub fn collect_app_server_to_openai(
     completion_id: &str,
@@ -17,6 +21,7 @@ pub fn collect_app_server_to_openai(
     tool_registry: Option<ToolRegistry>,
 ) -> ChatCompletionsResponse {
     let mut text = String::new();
+    let mut terminal_error = None;
     let mut assembler = ToolCallAssembler::new(tool_registry);
 
     for event in events {
@@ -46,6 +51,9 @@ pub fn collect_app_server_to_openai(
                     );
                 }
             }
+            AppServerEventKind::Error => {
+                terminal_error = event.error_message();
+            }
             _ => {}
         }
     }
@@ -63,6 +71,16 @@ pub fn collect_app_server_to_openai(
             },
         })
         .collect::<Vec<_>>();
+
+    if let Some(error) = terminal_error {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&error_text(&error));
+    }
+    if text.is_empty() && tool_calls.is_empty() {
+        text = error_text("Codex returned an empty response");
+    }
 
     ChatCompletionsResponse {
         id: completion_id.to_string(),
@@ -180,7 +198,10 @@ pub fn render_openai_sse_events(
                                 function: OpenAIChunkToolFunction {
                                     name: None,
                                     arguments: Some(
-                                        event.tool_arguments_json().map(|value| value.to_string()).unwrap_or_default(),
+                                        event
+                                            .tool_arguments_json()
+                                            .map(|value| value.to_string())
+                                            .unwrap_or_default(),
                                     ),
                                 },
                             }]),
@@ -210,6 +231,29 @@ pub fn render_openai_sse_events(
                         } else {
                             "stop".to_string()
                         }),
+                    }],
+                    usage: None,
+                }));
+                out.push(Event::default().data("[DONE]"));
+            }
+            AppServerEventKind::Error => {
+                out.push(json_event(&OpenAIChunk {
+                    id: completion_id.to_string(),
+                    object: "chat.completion.chunk".to_string(),
+                    created,
+                    model: model.to_string(),
+                    choices: vec![OpenAIChunkChoice {
+                        index: 0,
+                        delta: OpenAIChunkDelta {
+                            role: None,
+                            content: Some(error_text(
+                                &event
+                                    .error_message()
+                                    .unwrap_or_else(|| "app-server error".to_string()),
+                            )),
+                            tool_calls: None,
+                        },
+                        finish_reason: Some("stop".to_string()),
                     }],
                     usage: None,
                 }));
@@ -349,6 +393,30 @@ pub fn stream_executor_job_to_openai(
                     yield Ok(Event::default().data("[DONE]"));
                     break;
                 }
+                AppServerEventKind::Error => {
+                    yield Ok(json_event(&OpenAIChunk {
+                        id: completion_id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created,
+                        model: model.clone(),
+                        choices: vec![OpenAIChunkChoice {
+                            index: 0,
+                            delta: OpenAIChunkDelta {
+                                role: None,
+                                content: Some(error_text(
+                                    &event
+                                        .error_message()
+                                        .unwrap_or_else(|| "app-server error".to_string()),
+                                )),
+                                tool_calls: None,
+                            },
+                            finish_reason: Some("stop".to_string()),
+                        }],
+                        usage: None,
+                    }));
+                    yield Ok(Event::default().data("[DONE]"));
+                    break;
+                }
                 _ => {}
             }
         }
@@ -411,5 +479,27 @@ mod tests {
             .join("\n");
         assert!(debug.contains("tool_calls"));
         assert!(debug.contains("Read"));
+    }
+
+    #[test]
+    fn error_event_emits_openai_error_chunk() {
+        let event = AppServerEvent {
+            method: "error".to_string(),
+            kind: AppServerEventKind::Error,
+            params: json!({ "threadId": "t1", "turnId": "u1", "message": "quota exceeded" }),
+            thread_id: Some("t1".to_string()),
+            turn_id: Some("u1".to_string()),
+            item_id: None,
+            delta: None,
+        };
+
+        let rendered = render_openai_sse_events("chatcmpl-1", "gpt-5.4", vec![event]);
+        let debug = rendered
+            .iter()
+            .map(|evt| format!("{evt:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(debug.contains("[Error] quota exceeded"));
+        assert!(debug.contains("[DONE]"));
     }
 }

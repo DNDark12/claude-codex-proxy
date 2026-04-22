@@ -1,0 +1,90 @@
+version: "3.9"
+
+# ─── Services ─────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Production proxy ───────────────────────────────────────────────────────
+  proxy:
+    build: .
+    image: claude-codex-proxy:latest
+    container_name: claude-codex-proxy
+    restart: unless-stopped
+    ports:
+      - "${PROXY_PORT:-8080}:8080"
+    volumes:
+      # SQLite database — dữ liệu persistent
+      - proxy_data:/data
+      # Config dir: đặt accounts.toml và các auth*.json vào đây
+      - ./config:/config:ro
+    environment:
+      PROXY_PORT: "8080"
+      RUST_LOG: "${RUST_LOG:-info}"
+      DB_PATH: "/data/proxy.db"
+      ACCOUNTS_CONFIG_PATH: "/config/accounts.toml"
+      PROXY_AUTH_PATH: "/config/auth.json"
+      DISABLE_TOOL_FALLBACK: "${DISABLE_TOOL_FALLBACK:-false}"
+      APP_SERVER_TURN_TIMEOUT_SECS: "${APP_SERVER_TURN_TIMEOUT_SECS:-300}"
+      CLAUDE_CODEX_PROXY_MAX_SESSIONS: "${CLAUDE_CODEX_PROXY_MAX_SESSIONS:-256}"
+      CLAUDE_CODEX_PROXY_ENABLE_THREAD_REUSE: "${CLAUDE_CODEX_PROXY_ENABLE_THREAD_REUSE:-false}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "traefik.enable=false"   # Toggle nếu dùng Traefik
+
+  # ── Dev mode: rebuild on code change (dùng cargo watch) ───────────────────
+  # Chạy: docker compose --profile dev up proxy-dev
+  proxy-dev:
+    image: rust:1.78-slim
+    container_name: claude-codex-proxy-dev
+    working_dir: /app
+    command: >
+      bash -c "
+        apt-get update -q && apt-get install -y pkg-config libssl-dev wget &&
+        cargo install cargo-watch 2>/dev/null || true &&
+        cargo watch -x 'run -- serve'
+      "
+    ports:
+      - "${DEV_PORT:-8081}:8080"
+    volumes:
+      - .:/app
+      - cargo_cache:/usr/local/cargo/registry
+      - target_cache:/app/target
+      - ./config:/config:ro
+    environment:
+      RUST_LOG: "debug"
+      DB_PATH: "/tmp/proxy-dev.db"
+      ACCOUNTS_CONFIG_PATH: "/config/accounts.toml"
+    profiles: [dev]
+
+# ─── Volumes ──────────────────────────────────────────────────────────────────
+
+volumes:
+  proxy_data:
+    driver: local
+  cargo_cache:
+    driver: local
+  target_cache:
+    driver: local
+
+# ─── Hướng dẫn nhanh ──────────────────────────────────────────────────────────
+# 1. Tạo thư mục config:
+#    mkdir config
+#    cp accounts.toml.example config/accounts.toml
+#    cp ~/.codex/auth.json config/auth.json
+#
+# 2. Build và chạy:
+#    docker compose up -d
+#
+# 3. Xem log:
+#    docker compose logs -f proxy
+#
+# 4. Xem UI:
+#    http://localhost:8080/ui/
+#
+# 5. Dev mode (hot reload):
+#    docker compose --profile dev up proxy-dev

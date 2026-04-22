@@ -31,6 +31,12 @@ pub enum DelegationPolicy {
 pub struct BridgeSession {
     pub bridge_session_id: String,
     pub claude_session_id: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub account_auth_path: Option<String>,
+    #[serde(default)]
+    pub last_assistant_message: Option<String>,
     pub thread: BridgeThread,
     pub transport: TransportKind,
     pub operation_mode: OperationMode,

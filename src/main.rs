@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::Parser;
 use env_logger::Env;
@@ -54,8 +56,9 @@ async fn serve(runtime_args: RuntimeArgs) -> Result<()> {
     let skill_registry = load_optional_skill_registry(runtime.skills_registry_path.as_deref());
     let surface_registry = SurfaceRegistry::new();
     let compatibility_matrix = CompatibilityMatrix::new(&surface_registry);
-    let job_registry = JobRegistry::default();
-    let state_store = StateStore::default();
+    let job_registry = load_job_registry().await?;
+    let state_store = load_state_store().await?;
+    let account_pool = claude_codex_proxy::accounts::load_pool();
 
     let app_server = initialize_app_server(&runtime).await?;
     let legacy_client = initialize_legacy_client(&runtime).await?;
@@ -67,6 +70,7 @@ async fn serve(runtime_args: RuntimeArgs) -> Result<()> {
             runtime.operation_mode,
             runtime.api_stability,
             runtime.delegation_policy.clone(),
+            Some(account_pool.clone()),
         )
     });
 
@@ -74,6 +78,7 @@ async fn serve(runtime_args: RuntimeArgs) -> Result<()> {
         client: legacy_client,
         app_server,
         executor,
+        default_auth_path: runtime.auth_path.clone(),
         skill_registry,
         surface_registry,
         compatibility_matrix,
@@ -82,6 +87,7 @@ async fn serve(runtime_args: RuntimeArgs) -> Result<()> {
         operation_mode: runtime.operation_mode,
         api_stability: runtime.api_stability,
         delegation_policy: runtime.delegation_policy,
+        pool: account_pool,
     });
 
     log::info!("Proxy listening on http://0.0.0.0:{}", runtime.port);
@@ -96,6 +102,24 @@ async fn serve(runtime_args: RuntimeArgs) -> Result<()> {
         .try_bind(([0, 0, 0, 0], runtime.port))
         .await;
     Ok(())
+}
+
+async fn load_job_registry() -> Result<JobRegistry> {
+    match std::env::var("CLAUDE_CODEX_PROXY_JOBS_JSONL") {
+        Ok(path) if !path.trim().is_empty() => {
+            JobRegistry::with_jsonl_path(PathBuf::from(path)).await
+        }
+        _ => Ok(JobRegistry::default()),
+    }
+}
+
+async fn load_state_store() -> Result<StateStore> {
+    match std::env::var("CLAUDE_CODEX_PROXY_SESSIONS_JSONL") {
+        Ok(path) if !path.trim().is_empty() => {
+            StateStore::with_jsonl_path(PathBuf::from(path)).await
+        }
+        _ => Ok(StateStore::default()),
+    }
 }
 
 async fn initialize_app_server(runtime: &cli::RuntimeConfig) -> Result<Option<AppServerClient>> {
@@ -140,7 +164,9 @@ async fn initialize_legacy_client(runtime: &cli::RuntimeConfig) -> Result<Option
     }
 }
 
-fn load_optional_skill_registry(path: Option<&str>) -> Option<claude_codex_proxy::skills::SkillRegistry> {
+fn load_optional_skill_registry(
+    path: Option<&str>,
+) -> Option<claude_codex_proxy::skills::SkillRegistry> {
     let path = path?;
     match load_skill_registry(path) {
         Ok(registry) => {

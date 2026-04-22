@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::app_server::UserInput;
 use crate::app_server::session::DelegationPolicy;
 use crate::app_server::thread::BridgeThread;
-use crate::jobs::{ExecutorRequest, JobExecutor};
-use crate::jobs::model::{JobKind, JobRecord, JobStatus};
+use crate::app_server::UserInput;
+use crate::jobs::model::{unix_timestamp_now, JobKind, JobRecord, JobStatus};
 use crate::jobs::registry::JobRegistry;
+use crate::jobs::{ExecutorRequest, JobExecutor};
 use crate::mapping::tools::ToolWarning;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,16 +39,27 @@ pub async fn map_agent_spawn(
             reason: Some("DelegationPolicy::Never — subagent spawn rejected".to_string()),
             warnings: Vec::new(),
         },
-        DelegationPolicy::ExplicitOnly | DelegationPolicy::Heuristic | DelegationPolicy::ForceForSurface(_) => {
+        DelegationPolicy::ExplicitOnly
+        | DelegationPolicy::Heuristic
+        | DelegationPolicy::ForceForSurface(_) => {
             if let Some(executor) = executor {
-                if let Ok(start) = executor.start_job(ExecutorRequest {
-                    origin_surface_id: "tool.agent".to_string(),
-                    kind: JobKind::Subagent,
-                    cwd: request.cwd.clone().unwrap_or_else(|| thread.cwd.clone()),
-                    model: "gpt-5.4".to_string(),
-                    developer_instructions: None,
-                    input: vec![UserInput::Text { text: request.task.clone() }],
-                }).await {
+                if let Ok(start) = executor
+                    .start_job(ExecutorRequest {
+                        origin_surface_id: "tool.agent".to_string(),
+                        kind: JobKind::Subagent,
+                        cwd: request.cwd.clone().unwrap_or_else(|| thread.cwd.clone()),
+                        model: "gpt-5.4".to_string(),
+                        developer_instructions: None,
+                        input: vec![UserInput::Text {
+                            text: request.task.clone(),
+                        }],
+                        existing_thread_id: None,
+                        client_session_id: None,
+                        account_id: None,
+                        account_auth_path: None,
+                    })
+                    .await
+                {
                     return AgentSpawnResult {
                         job_id: start.job_id,
                         allowed: true,
@@ -69,6 +80,10 @@ pub async fn map_agent_spawn(
                 codex_turn_id: None,
                 codex_agent_ids: Vec::new(),
                 worktree_path: None,
+                account_id: None,
+                account_auth_path: None,
+                created_at: unix_timestamp_now(),
+                finished_at: None,
                 result_summary: Some(request.task.clone()),
                 warnings: Vec::new(),
                 error_message: None,
@@ -148,12 +163,16 @@ mod tests {
     async fn agent_explicit_only_allowed() {
         let registry = JobRegistry::default();
         let result = map_agent_spawn(
-            AgentSpawnRequest { task: "review code".to_string(), cwd: None },
+            AgentSpawnRequest {
+                task: "review code".to_string(),
+                cwd: None,
+            },
             &test_thread(),
             &DelegationPolicy::ExplicitOnly,
             None,
             &registry,
-        ).await;
+        )
+        .await;
         assert!(result.allowed);
         assert!(registry.get(&result.job_id).await.is_some());
     }
@@ -163,12 +182,16 @@ mod tests {
     async fn agent_never_rejected() {
         let registry = JobRegistry::default();
         let result = map_agent_spawn(
-            AgentSpawnRequest { task: "review code".to_string(), cwd: None },
+            AgentSpawnRequest {
+                task: "review code".to_string(),
+                cwd: None,
+            },
             &test_thread(),
             &DelegationPolicy::Never,
             None,
             &registry,
-        ).await;
+        )
+        .await;
         assert!(!result.allowed);
         assert!(result.reason.is_some());
     }
@@ -182,12 +205,16 @@ mod tests {
 
         // Spawn child subagent
         let child = map_agent_spawn(
-            AgentSpawnRequest { task: "fix bug".to_string(), cwd: None },
+            AgentSpawnRequest {
+                task: "fix bug".to_string(),
+                cwd: None,
+            },
             &parent_thread,
             &DelegationPolicy::ExplicitOnly,
             None,
             &registry,
-        ).await;
+        )
+        .await;
         assert!(child.allowed);
 
         // Child job exists independently
@@ -201,12 +228,16 @@ mod tests {
 
         // Multiple children don't interfere with each other
         let child2 = map_agent_spawn(
-            AgentSpawnRequest { task: "review code".to_string(), cwd: None },
+            AgentSpawnRequest {
+                task: "review code".to_string(),
+                cwd: None,
+            },
             &parent_thread,
             &DelegationPolicy::ExplicitOnly,
             None,
             &registry,
-        ).await;
+        )
+        .await;
         assert!(child2.allowed);
         assert_ne!(child.job_id, child2.job_id);
     }

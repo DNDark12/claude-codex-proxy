@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::app_server::UserInput;
 use crate::app_server::thread::BridgeThread;
-use crate::jobs::{ExecutorRequest, JobExecutor};
-use crate::jobs::model::{JobKind, JobRecord, JobStatus};
+use crate::app_server::UserInput;
+use crate::jobs::model::{unix_timestamp_now, JobKind, JobRecord, JobStatus};
 use crate::jobs::registry::JobRegistry;
+use crate::jobs::{ExecutorRequest, JobExecutor};
 use crate::mapping::tools::ToolWarning;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +47,10 @@ pub async fn map_task_create(
                 model: "gpt-5.4".to_string(),
                 developer_instructions: None,
                 input: vec![UserInput::Text { text: task_text }],
+                existing_thread_id: None,
+                client_session_id: None,
+                account_id: None,
+                account_auth_path: None,
             })
             .await
         {
@@ -75,6 +79,10 @@ pub async fn map_task_create(
         codex_turn_id: None,
         codex_agent_ids: Vec::new(),
         worktree_path: None,
+        account_id: None,
+        account_auth_path: None,
+        created_at: unix_timestamp_now(),
+        finished_at: None,
         result_summary: Some(match request.instructions.as_deref() {
             Some(instructions) if !instructions.is_empty() => {
                 format!("{} — {}", request.description, instructions)
@@ -196,11 +204,16 @@ mod tests {
     async fn task_create_creates_job() {
         let registry = JobRegistry::default();
         let result = map_task_create(
-            TaskCreateRequest { description: "test".to_string(), instructions: None, cwd: None },
+            TaskCreateRequest {
+                description: "test".to_string(),
+                instructions: None,
+                cwd: None,
+            },
             &test_thread(),
             None,
             &registry,
-        ).await;
+        )
+        .await;
         assert_eq!(result.status, JobStatus::Queued);
         assert!(registry.get(&result.job_id).await.is_some());
     }
@@ -210,11 +223,16 @@ mod tests {
     async fn task_get_and_list() {
         let registry = JobRegistry::default();
         let result = map_task_create(
-            TaskCreateRequest { description: "a".to_string(), instructions: None, cwd: None },
+            TaskCreateRequest {
+                description: "a".to_string(),
+                instructions: None,
+                cwd: None,
+            },
             &test_thread(),
             None,
             &registry,
-        ).await;
+        )
+        .await;
         assert!(map_task_get(&result.job_id, &registry).await.is_some());
         assert_eq!(map_task_list(&registry).await.len(), 1);
     }
@@ -223,12 +241,19 @@ mod tests {
     async fn task_stop_cancels() {
         let registry = JobRegistry::default();
         let result = map_task_create(
-            TaskCreateRequest { description: "x".to_string(), instructions: None, cwd: None },
+            TaskCreateRequest {
+                description: "x".to_string(),
+                instructions: None,
+                cwd: None,
+            },
             &test_thread(),
             None,
             &registry,
-        ).await;
-        let stopped = map_task_stop(&result.job_id, None, &registry).await.unwrap();
+        )
+        .await;
+        let stopped = map_task_stop(&result.job_id, None, &registry)
+            .await
+            .unwrap();
         assert_eq!(stopped.status, JobStatus::Cancelled);
     }
 }

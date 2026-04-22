@@ -2,10 +2,10 @@ use crate::domain::codex::{
     CodexContentPart, CodexInputItem, CodexMessageContent, CodexResponsesRequest, CodexTextFormat,
     CodexTextFormatType,
 };
-use crate::model_profiles::resolve_model_profile;
 use crate::domain::openai::{
     ChatCompletionsRequest, OpenAIContent, OpenAIContentPart, OpenAIImageUrl,
 };
+use crate::model_profiles::resolve_model_profile;
 use crate::translation::tool_format::{
     openai_functions_to_codex, openai_tool_choice_to_codex, openai_tools_to_codex,
 };
@@ -260,10 +260,13 @@ mod tests {
         let out = translate_openai_to_codex(&req);
 
         assert_eq!(out.model, "gpt-5.2-codex");
-        assert_eq!(out.reasoning, Some(json!({
-            "summary": "auto",
-            "effort": "high"
-        })));
+        assert_eq!(
+            out.reasoning,
+            Some(json!({
+                "summary": "auto",
+                "effort": "high"
+            }))
+        );
     }
 
     #[test]
@@ -292,9 +295,12 @@ mod tests {
         let out = translate_openai_to_codex(&req);
 
         assert_eq!(out.model, "gpt-5.2-codex");
-        assert_eq!(out.reasoning, Some(json!({
-            "summary": "auto",
-            "effort": "low"
-        })));
+        assert_eq!(
+            out.reasoning,
+            Some(json!({
+                "summary": "auto",
+                "effort": "low"
+            }))
+        );
     }
 }

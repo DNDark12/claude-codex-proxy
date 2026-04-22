@@ -99,10 +99,8 @@ mod tests {
 
     #[test]
     fn expands_public_models_with_reasoning_profiles() {
-        let models = expand_public_models([
-            "gpt-5.2-codex".to_string(),
-            "gpt-5.2-codex".to_string(),
-        ]);
+        let models =
+            expand_public_models(["gpt-5.2-codex".to_string(), "gpt-5.2-codex".to_string()]);
 
         assert_eq!(
             models,

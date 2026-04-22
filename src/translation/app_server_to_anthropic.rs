@@ -22,6 +22,7 @@ pub fn collect_app_server_to_anthropic(
     tool_registry: Option<ToolRegistry>,
 ) -> AnthropicMessagesResponse {
     let mut text = String::new();
+    let mut terminal_error = None;
     let mut assembler = ToolCallAssembler::new(tool_registry);
 
     for event in events {
@@ -51,12 +52,24 @@ pub fn collect_app_server_to_anthropic(
                     );
                 }
             }
+            AppServerEventKind::Error => {
+                terminal_error = event.error_message();
+            }
             _ => {}
         }
     }
 
     let decisions = assembler.finalize_all();
     let mut content = Vec::new();
+    if let Some(error) = terminal_error {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&error_text(&error));
+    }
+    if text.is_empty() && decisions.is_empty() {
+        text = error_text("Codex returned an empty response");
+    }
     if !text.is_empty() {
         content.push(AnthropicResponseContentBlock::Text { text });
     }
@@ -172,21 +185,29 @@ pub fn render_anthropic_sse_events(
                     content_index += 1;
                     open_block = OpenBlock::None;
                 }
-                out.push(sse_event(
-                    "message_delta",
-                    json!({
-                        "type": "message_delta",
-                        "delta": {
-                            "stop_reason": if has_valid_tool_calls { "tool_use" } else { "end_turn" },
-                            "stop_sequence": null
-                        },
-                        "usage": {
-                            "input_tokens": 0,
-                            "output_tokens": 0
-                        }
-                    }),
-                ));
-                out.push(sse_event("message_stop", json!({ "type": "message_stop" })));
+                finish_message_events(has_valid_tool_calls, &mut out);
+            }
+            AppServerEventKind::Error => {
+                if matches!(open_block, OpenBlock::Text | OpenBlock::Tool) {
+                    out.push(close_block(content_index));
+                    content_index += 1;
+                    open_block = OpenBlock::None;
+                }
+                for evt in ensure_text_delta(
+                    &mut open_block,
+                    &mut content_index,
+                    &error_text(
+                        &event
+                            .error_message()
+                            .unwrap_or_else(|| "app-server error".to_string()),
+                    ),
+                ) {
+                    out.push(evt);
+                }
+                out.push(close_block(content_index));
+                content_index += 1;
+                open_block = OpenBlock::None;
+                finish_message_events(false, &mut out);
             }
             _ => {}
         }
@@ -276,18 +297,31 @@ pub fn stream_executor_job_to_anthropic(
                     if matches!(open_block, OpenBlock::Text | OpenBlock::Tool) {
                         yield Ok(close_block(content_index));
                     }
-                    yield Ok(sse_event(
-                        "message_delta",
-                        json!({
-                            "type": "message_delta",
-                            "delta": {
-                                "stop_reason": if has_valid_tool_calls { "tool_use" } else { "end_turn" },
-                                "stop_sequence": null
-                            },
-                            "usage": { "input_tokens": 0, "output_tokens": 0 }
-                        }),
-                    ));
-                    yield Ok(sse_event("message_stop", json!({ "type": "message_stop" })));
+                    let mut tail = Vec::new();
+                    finish_message_events(has_valid_tool_calls, &mut tail);
+                    for event in tail {
+                        yield Ok(event);
+                    }
+                    break;
+                }
+                AppServerEventKind::Error => {
+                    if matches!(open_block, OpenBlock::Text | OpenBlock::Tool) {
+                        yield Ok(close_block(content_index));
+                        content_index += 1;
+                    }
+                    for rendered in ensure_text_delta(
+                        &mut open_block,
+                        &mut content_index,
+                        &error_text(&event.error_message().unwrap_or_else(|| "app-server error".to_string())),
+                    ) {
+                        yield Ok(rendered);
+                    }
+                    yield Ok(close_block(content_index));
+                    let mut tail = Vec::new();
+                    finish_message_events(false, &mut tail);
+                    for event in tail {
+                        yield Ok(event);
+                    }
                     break;
                 }
                 _ => {}
@@ -351,6 +385,28 @@ fn ensure_text_delta(
     ));
 
     events
+}
+
+fn error_text(message: &str) -> String {
+    format!("[Error] {message}")
+}
+
+fn finish_message_events(has_valid_tool_calls: bool, out: &mut Vec<Event>) {
+    out.push(sse_event(
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": if has_valid_tool_calls { "tool_use" } else { "end_turn" },
+                "stop_sequence": null
+            },
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+            }
+        }),
+    ));
+    out.push(sse_event("message_stop", json!({ "type": "message_stop" })));
 }
 
 #[cfg(test)]
@@ -425,6 +481,28 @@ mod tests {
             .map(|event| format!("{event:?}"))
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(debug.contains("message_stop"));
+    }
+
+    #[test]
+    fn error_event_emits_visible_error_text() {
+        let event = AppServerEvent {
+            method: "error".to_string(),
+            kind: AppServerEventKind::Error,
+            params: json!({ "threadId": "t1", "turnId": "u1", "message": "quota exceeded" }),
+            thread_id: Some("t1".to_string()),
+            turn_id: Some("u1".to_string()),
+            item_id: None,
+            delta: None,
+        };
+
+        let rendered = render_anthropic_sse_events("msg_1", "gpt-5.4", vec![event]);
+        let debug = rendered
+            .iter()
+            .map(|evt| format!("{evt:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(debug.contains("[Error] quota exceeded"));
         assert!(debug.contains("message_stop"));
     }
 }

@@ -1,4 +1,12 @@
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub fn unix_timestamp_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +60,14 @@ pub struct JobRecord {
     #[serde(default)]
     pub codex_agent_ids: Vec<String>,
     pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub account_auth_path: Option<String>,
+    #[serde(default = "unix_timestamp_now")]
+    pub created_at: i64,
+    #[serde(default)]
+    pub finished_at: Option<i64>,
     pub result_summary: Option<String>,
     #[serde(default)]
     pub warnings: Vec<String>,

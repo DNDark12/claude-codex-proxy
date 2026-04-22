@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sessions — claude-codex-proxy</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #7d8590; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; }
+  a { color: var(--accent); text-decoration: none; }
+  nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; height: 48px; gap: 24px; }
+  nav .logo { font-weight: 600; color: var(--text); font-size: 15px; }
+  nav a { color: var(--muted); font-size: 13px; padding: 4px 8px; border-radius: 6px; }
+  nav a:hover, nav a.active { color: var(--text); background: var(--border); text-decoration: none; }
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 24px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+
+  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 24px; overflow: hidden; }
+  .section-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .section-header h2 { font-size: 15px; font-weight: 600; }
+  .header-right { display: flex; gap: 8px; align-items: center; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; text-transform: uppercase; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; }
+  .badge-green { background: rgba(63,185,80,.15); color: var(--green); }
+  .badge-yellow { background: rgba(210,153,34,.15); color: var(--yellow); }
+  .badge-red { background: rgba(248,81,73,.15); color: var(--red); }
+  .badge-blue { background: rgba(88,166,255,.15); color: var(--accent); }
+  .badge-purple { background: rgba(188,140,255,.15); color: var(--purple); }
+  .badge-muted { background: rgba(125,133,144,.15); color: var(--muted); }
+
+  .btn { background: var(--border); color: var(--text); border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .btn:hover { background: #3d444d; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+  select { background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; font-size: 13px; outline: none; }
+
+  .loading { color: var(--muted); font-size: 13px; padding: 32px; text-align: center; }
+  .mono { font-family: 'SFMono-Regular', Consolas, monospace; font-size: 12px; }
+
+  /* Detail panel */
+  .detail-panel { position: fixed; top: 0; right: 0; width: 480px; height: 100vh; background: var(--surface); border-left: 1px solid var(--border); overflow-y: auto; transform: translateX(100%); transition: transform .2s; z-index: 200; }
+  .detail-panel.open { transform: translateX(0); }
+  .detail-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  .detail-body { padding: 20px; }
+  .kv { display: flex; flex-direction: column; gap: 12px; }
+  .kv-row { border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+  .kv-row:last-child { border-bottom: none; }
+  .kv-key { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-bottom: 4px; }
+  .kv-val { font-size: 13px; word-break: break-all; }
+
+  .tabs { display: flex; border-bottom: 1px solid var(--border); }
+  .tab { padding: 10px 20px; font-size: 13px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--accent); border-color: var(--accent); }
+
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  .counts-row { display: flex; gap: 0; border-bottom: 1px solid var(--border); }
+  .count-box { flex: 1; padding: 16px; text-align: center; border-right: 1px solid var(--border); }
+  .count-box:last-child { border-right: none; }
+  .count-box .v { font-size: 24px; font-weight: 700; }
+  .count-box .k { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-top: 4px; }
+</style>
+</head>
+<body>
+<nav>
+  <span class="logo">⬡ claude-codex-proxy</span>
+  <a href="/">Dashboard</a>
+  <a href="/accounts">Accounts</a>
+  <a href="/sessions" class="active">Sessions</a>
+</nav>
+
+<main>
+  <h1>Sessions & Jobs</h1>
+  <p class="subtitle">Live state của sessions và background jobs. Click vào row để xem chi tiết.</p>
+
+  <!-- Counts -->
+  <div class="section">
+    <div class="counts-row">
+      <div class="count-box"><div class="v" id="c-sessions">—</div><div class="k">Sessions</div></div>
+      <div class="count-box"><div class="v" id="c-running" style="color:var(--accent)">—</div><div class="k">Running</div></div>
+      <div class="count-box"><div class="v" id="c-done" style="color:var(--green)">—</div><div class="k">Done</div></div>
+      <div class="count-box"><div class="v" id="c-failed" style="color:var(--red)">—</div><div class="k">Failed</div></div>
+    </div>
+  </div>
+
+  <!-- Tabs: Sessions / Jobs / Surfaces -->
+  <div class="section">
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('jobs', this)">Jobs</div>
+      <div class="tab" onclick="switchTab('surfaces', this)">Surfaces</div>
+      <div class="tab" onclick="switchTab('compat', this)">Compatibility</div>
+    </div>
+
+    <!-- Jobs tab -->
+    <div id="tab-jobs" class="tab-content active">
+      <div class="section-header" style="border-top:none;border-bottom:none">
+        <div></div>
+        <div class="header-right">
+          <select id="filter-status" onchange="loadJobs()">
+            <option value="">All statuses</option>
+            <option value="running">Running</option>
+            <option value="completed">Completed</option>
+            <option value="failed">Failed</option>
+            <option value="queued">Queued</option>
+          </select>
+          <button class="btn" onclick="loadJobs()">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="jobs-table"><div class="loading">Loading jobs...</div></div>
+    </div>
+
+    <!-- Surfaces tab -->
+    <div id="tab-surfaces" class="tab-content">
+      <div id="surfaces-table"><div class="loading">Click to load...</div></div>
+    </div>
+
+    <!-- Compatibility tab -->
+    <div id="tab-compat" class="tab-content">
+      <div id="compat-table"><div class="loading">Click to load...</div></div>
+    </div>
+  </div>
+</main>
+
+<!-- Detail panel -->
+<div class="detail-panel" id="detail-panel">
+  <div class="detail-header">
+    <strong id="detail-title">Detail</strong>
+    <button class="btn btn-sm" onclick="closeDetail()">✕</button>
+  </div>
+  <div class="detail-body" id="detail-body"></div>
+</div>
+
+<script>
+const jobCache = new Map();
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'surfaces') loadSurfaces();
+  if (name === 'compat') loadCompat();
+  if (name === 'jobs') loadJobs();
+}
+
+function jobBadge(s) {
+  const map = {
+    queued: 'muted',
+    running: 'blue',
+    waiting_approval: 'yellow',
+    waiting_clarification: 'yellow',
+    completed: 'green',
+    failed: 'red',
+    cancelled: 'yellow'
+  };
+  return `<span class="badge badge-${map[s]||'muted'}">${s}</span>`;
+}
+
+function ts(unix) {
+  if (!unix) return '—';
+  return new Date(unix * 1000).toLocaleString();
+}
+
+function ago(unix) {
+  if (!unix) return '—';
+  const secs = Math.floor(Date.now()/1000) - unix;
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
+  return `${Math.floor(secs/3600)}h ago`;
+}
+
+async function loadJobs() {
+  const filter = document.getElementById('filter-status').value;
+  try {
+    const [jobsPayload, sessionsPayload] = await Promise.all([
+      fetch('/bridge/jobs').then(r => r.json()),
+      fetch('/bridge/sessions').then(r => r.json()).catch(() => [])
+    ]);
+    let jobs = Array.isArray(jobsPayload) ? jobsPayload : (jobsPayload.jobs || jobsPayload.data || []);
+    const sessions = Array.isArray(sessionsPayload) ? sessionsPayload : (sessionsPayload.sessions || sessionsPayload.data || []);
+    if (filter) jobs = jobs.filter(j => j.status === filter);
+
+    // Update counts
+    const all = Array.isArray(jobsPayload) ? jobsPayload : (jobsPayload.jobs || jobsPayload.data || []);
+    document.getElementById('c-sessions').textContent = sessions.length;
+    document.getElementById('c-running').textContent = all.filter(j => j.status === 'running').length;
+    document.getElementById('c-done').textContent = all.filter(j => j.status === 'completed').length;
+    document.getElementById('c-failed').textContent = all.filter(j => j.status === 'failed').length;
+
+    if (jobs.length === 0) {
+      document.getElementById('jobs-table').innerHTML = '<div class="loading">No jobs found</div>';
+      return;
+    }
+
+    jobCache.clear();
+    jobs.forEach(job => jobCache.set(job.id, job));
+
+    document.getElementById('jobs-table').innerHTML = `
+      <table>
+        <thead><tr><th>Job ID</th><th>Session</th><th>Surface</th><th>Status</th><th>Account</th><th>Started</th><th>Duration</th></tr></thead>
+        <tbody>${jobs.map(j => `
+          <tr style="cursor:pointer" onclick="showJobDetail('${j.id}')">
+            <td class="mono">${j.id ? j.id.slice(0,12)+'…' : '—'}</td>
+            <td class="mono" style="color:var(--muted)">${j.sessionId ? escapeHtml(j.sessionId.slice(0,8)+'…') : '—'}</td>
+            <td>${j.surface ? `<span class="badge badge-purple">${escapeHtml(j.surface)}</span>` : '—'}</td>
+            <td>${jobBadge(j.status)}</td>
+            <td style="color:var(--muted)">${j.accountId ? escapeHtml(j.accountId) : '—'}</td>
+            <td style="color:var(--muted)">${ago(j.startedAt)}</td>
+            <td style="color:var(--muted)">${j.durationSecs != null ? `${j.durationSecs}s` : j.status === 'running' ? '⏳' : '—'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    document.getElementById('jobs-table').innerHTML = `<div class="loading" style="color:var(--muted)">No job data: ${e.message}</div>`;
+  }
+}
+
+function showJobDetail(jobId) {
+  const j = jobCache.get(jobId);
+  if (!j) return;
+  document.getElementById('detail-title').textContent = `Job: ${j.id ? j.id.slice(0,12) : '?'}`;
+  document.getElementById('detail-body').innerHTML = `
+    <div class="kv">
+      <div class="kv-row"><div class="kv-key">Job ID</div><div class="kv-val mono">${escapeHtml(j.id || '—')}</div></div>
+      <div class="kv-row"><div class="kv-key">Session ID</div><div class="kv-val mono">${escapeHtml(j.sessionId || '—')}</div></div>
+      <div class="kv-row"><div class="kv-key">Thread ID</div><div class="kv-val mono">${escapeHtml(j.threadId || '—')}</div></div>
+      <div class="kv-row"><div class="kv-key">Turn ID</div><div class="kv-val mono">${escapeHtml(j.turnId || '—')}</div></div>
+      <div class="kv-row"><div class="kv-key">Status</div><div class="kv-val">${jobBadge(j.status)}</div></div>
+      <div class="kv-row"><div class="kv-key">Surface</div><div class="kv-val">${escapeHtml(j.surface || '—')}</div></div>
+      <div class="kv-row"><div class="kv-key">Kind</div><div class="kv-val">${escapeHtml(j.kind || '—')}</div></div>
+      <div class="kv-row"><div class="kv-key">Account</div><div class="kv-val">${escapeHtml(j.accountId || '—')}</div></div>
+      <div class="kv-row"><div class="kv-key">Started</div><div class="kv-val">${ts(j.startedAt)}</div></div>
+      <div class="kv-row"><div class="kv-key">Finished</div><div class="kv-val">${ts(j.finishedAt)}</div></div>
+      ${j.resultPreview ? `<div class="kv-row"><div class="kv-key">Result</div><div class="kv-val">${escapeHtml(j.resultPreview)}</div></div>` : ''}
+      ${j.error ? `<div class="kv-row"><div class="kv-key">Error</div><div class="kv-val" style="color:var(--red)">${escapeHtml(j.error)}</div></div>` : ''}
+    </div>`;
+  document.getElementById('detail-panel').classList.add('open');
+}
+
+async function loadSurfaces() {
+  try {
+    const d = await fetch('/bridge/surfaces').then(r => r.json());
+    const surfaces = Array.isArray(d) ? d : (d.surfaces || Object.values(d));
+    if (surfaces.length === 0) {
+      document.getElementById('surfaces-table').innerHTML = '<div class="loading">No surface data</div>';
+      return;
+    }
+    const strategyBadge = s => {
+      const map = { native:'green', mediated_native:'blue', workflow_emulated:'yellow', unsupported_explicit:'red' };
+      return `<span class="badge badge-${map[s]||'muted'}">${s||'unknown'}</span>`;
+    };
+    document.getElementById('surfaces-table').innerHTML = `
+      <table>
+        <thead><tr><th>Surface ID</th><th>Strategy</th><th>Tier</th><th>App-Server</th><th>Responses</th></tr></thead>
+        <tbody>${surfaces.map(s => `
+          <tr>
+            <td class="mono">${s.id || s.name || '—'}</td>
+            <td>${strategyBadge(s.strategy || s.mapping_strategy)}</td>
+            <td style="color:var(--muted)">${s.tier ?? '—'}</td>
+            <td>${s.app_server_supported || s.supported_app_server ? '<span class="badge badge-green">✓</span>' : '<span class="badge badge-muted">—</span>'}</td>
+            <td>${s.responses_supported || s.supported_responses ? '<span class="badge badge-blue">✓</span>' : '<span class="badge badge-muted">—</span>'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    document.getElementById('surfaces-table').innerHTML = `<div class="loading" style="color:var(--muted)">Could not load /bridge/surfaces</div>`;
+  }
+}
+
+async function loadCompat() {
+  try {
+    const d = await fetch('/bridge/compatibility').then(r => r.json());
+    document.getElementById('compat-table').innerHTML = `
+      <div style="padding:20px">
+        <pre style="color:var(--muted);font-size:12px;font-family:monospace;overflow:auto;max-height:500px">${JSON.stringify(d, null, 2)}</pre>
+      </div>`;
+  } catch(e) {
+    document.getElementById('compat-table').innerHTML = `<div class="loading" style="color:var(--muted)">Could not load /bridge/compatibility</div>`;
+  }
+}
+
+function closeDetail() {
+  document.getElementById('detail-panel').classList.remove('open');
+}
+
+loadJobs();
+setInterval(loadJobs, 10000);
+</script>
+</body>
+</html>

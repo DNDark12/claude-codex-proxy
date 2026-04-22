@@ -55,13 +55,23 @@ impl From<JsonRpcNotification> for AppServerEvent {
         let turn_id = notification
             .params
             .get("turnId")
-            .or_else(|| notification.params.get("turn").and_then(|turn| turn.get("id")))
+            .or_else(|| {
+                notification
+                    .params
+                    .get("turn")
+                    .and_then(|turn| turn.get("id"))
+            })
             .and_then(Value::as_str)
             .map(str::to_string);
         let item_id = notification
             .params
             .get("itemId")
-            .or_else(|| notification.params.get("item").and_then(|item| item.get("id")))
+            .or_else(|| {
+                notification
+                    .params
+                    .get("item")
+                    .and_then(|item| item.get("id"))
+            })
             .and_then(Value::as_str)
             .map(str::to_string);
         let delta = notification
@@ -83,10 +93,34 @@ impl From<JsonRpcNotification> for AppServerEvent {
 }
 
 impl AppServerEvent {
+    pub fn error_message(&self) -> Option<String> {
+        self.params
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                self.params
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .or_else(|| {
+                self.params
+                    .get("details")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+    }
+
     pub fn tool_name(&self) -> Option<&str> {
         self.params
             .get("toolName")
-            .or_else(|| self.params.get("item").and_then(|item| item.get("toolName")))
+            .or_else(|| {
+                self.params
+                    .get("item")
+                    .and_then(|item| item.get("toolName"))
+            })
             .and_then(Value::as_str)
     }
 

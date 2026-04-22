@@ -540,10 +540,13 @@ mod tests {
         let out = translate_anthropic_to_codex(&req, None);
 
         assert_eq!(out.model, "gpt-5.2-codex");
-        assert_eq!(out.reasoning, Some(json!({
-            "summary": "auto",
-            "effort": "high"
-        })));
+        assert_eq!(
+            out.reasoning,
+            Some(json!({
+                "summary": "auto",
+                "effort": "high"
+            }))
+        );
     }
 
     #[test]
@@ -564,9 +567,12 @@ mod tests {
         let out = translate_anthropic_to_codex(&req, None);
 
         assert_eq!(out.model, "gpt-5.2-codex");
-        assert_eq!(out.reasoning, Some(json!({
-            "summary": "auto",
-            "effort": "low"
-        })));
+        assert_eq!(
+            out.reasoning,
+            Some(json!({
+                "summary": "auto",
+                "effort": "low"
+            }))
+        );
     }
 }

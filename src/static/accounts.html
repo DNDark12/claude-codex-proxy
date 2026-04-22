@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Accounts — claude-codex-proxy</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #7d8590; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; height: 48px; gap: 24px; }
+  nav .logo { font-weight: 600; color: var(--text); font-size: 15px; }
+  nav a { color: var(--muted); font-size: 13px; padding: 4px 8px; border-radius: 6px; }
+  nav a:hover, nav a.active { color: var(--text); background: var(--border); text-decoration: none; }
+  main { max-width: 1000px; margin: 0 auto; padding: 32px 24px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+
+  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 24px; overflow: hidden; }
+  .section-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .section-header h2 { font-size: 15px; font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; text-transform: uppercase; }
+  td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; }
+  .badge-green { background: rgba(63,185,80,.15); color: var(--green); }
+  .badge-yellow { background: rgba(210,153,34,.15); color: var(--yellow); }
+  .badge-red { background: rgba(248,81,73,.15); color: var(--red); }
+  .badge-muted { background: rgba(125,133,144,.15); color: var(--muted); }
+
+  /* Buttons */
+  .btn { background: var(--border); color: var(--text); border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .btn:hover { background: #3d444d; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .btn-green { background: rgba(63,185,80,.2); color: var(--green); }
+  .btn-green:hover { background: rgba(63,185,80,.3); }
+  .btn-red { background: rgba(248,81,73,.15); color: var(--red); }
+  .btn-red:hover { background: rgba(248,81,73,.25); }
+  .btn-yellow { background: rgba(210,153,34,.15); color: var(--yellow); }
+  .btn-yellow:hover { background: rgba(210,153,34,.25); }
+  .btn-group { display: flex; gap: 6px; }
+
+  /* Add form */
+  .add-form { padding: 20px; display: none; }
+  .add-form.open { display: block; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .form-group { display: flex; flex-direction: column; gap: 6px; }
+  .form-group label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .3px; }
+  input[type=text] { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 13px; width: 100%; outline: none; }
+  input[type=text]:focus { border-color: var(--accent); }
+  .form-actions { display: flex; gap: 8px; align-items: center; }
+
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot-green { background: var(--green); }
+  .dot-yellow { background: var(--yellow); }
+  .dot-muted { background: var(--muted); }
+
+  .loading { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
+  .toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 18px; font-size: 13px; display: none; z-index: 100; }
+  .toast.show { display: block; }
+  .toast.ok { border-color: var(--green); color: var(--green); }
+  .toast.fail { border-color: var(--red); color: var(--red); }
+
+  .stat-row { display: flex; gap: 16px; padding: 16px 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .stat-item { text-align: center; min-width: 80px; }
+  .stat-item .v { font-size: 22px; font-weight: 700; }
+  .stat-item .k { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-top: 2px; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .tab { padding: 8px 16px; font-size: 13px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; background: none; border-top: none; border-left: none; border-right: none; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  textarea { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 12px; font-family: monospace; width: 100%; outline: none; resize: vertical; min-height: 36px; }
+  textarea:focus { border-color: var(--accent); }
+
+  .discover-section { padding: 20px; }
+  .discover-item { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .discover-item:last-child { border-bottom: none; }
+  .discover-meta { font-size: 12px; color: var(--muted); }
+  .validate-result { margin-top: 8px; padding: 10px; border-radius: 6px; font-size: 12px; background: rgba(88,166,255,.08); border: 1px solid var(--border); display: none; }
+  .validate-result.show { display: block; }
+</style>
+</head>
+<body>
+<nav>
+  <span class="logo">⬡ claude-codex-proxy</span>
+  <a href="/">Dashboard</a>
+  <a href="/accounts" class="active">Accounts</a>
+  <a href="/sessions">Sessions</a>
+</nav>
+
+<main>
+  <h1>Account Pool</h1>
+  <p class="subtitle">Round-robin rotation với health tracking. Accounts degraded tự recover sau cooldown.</p>
+
+  <div class="section">
+    <div id="stats-row" class="stat-row">
+      <div class="stat-item"><div class="v" id="st-total">—</div><div class="k">Total</div></div>
+      <div class="stat-item"><div class="v" id="st-active" style="color:var(--green)">—</div><div class="k">Available</div></div>
+      <div class="stat-item"><div class="v" id="st-ratelimited" style="color:var(--yellow)">—</div><div class="k">Rate Limited</div></div>
+      <div class="stat-item"><div class="v" id="st-degraded" style="color:var(--yellow)">—</div><div class="k">Cooling Down</div></div>
+      <div class="stat-item"><div class="v" id="st-disabled" style="color:var(--muted)">—</div><div class="k">Disabled</div></div>
+    </div>
+    <div class="section-header" style="border-top:none">
+      <h2>All Accounts</h2>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="load()">↻ Refresh</button>
+        <button class="btn btn-green" onclick="toggleAddForm()">+ Add Account</button>
+      </div>
+    </div>
+
+    <!-- Tabbed Add form -->
+    <div class="add-form" id="add-form">
+      <div class="tabs">
+        <button class="tab active" onclick="switchTab('token')">By Token</button>
+        <button class="tab" onclick="switchTab('path')">By Auth Path</button>
+      </div>
+
+      <!-- Token tab -->
+      <div class="tab-content active" id="tab-token">
+        <div class="form-grid">
+          <div class="form-group">
+            <label>ID *</label>
+            <input type="text" id="ft-id" placeholder="personal">
+          </div>
+          <div class="form-group">
+            <label>Label</label>
+            <input type="text" id="ft-label" placeholder="My Account">
+          </div>
+          <div class="form-group" style="grid-column:1/-1">
+            <label>Auth JSON * <small style="color:var(--muted);font-weight:normal">(paste entire auth.json content)</small></label>
+            <textarea id="ft-json" rows="6" placeholder='{"auth_mode":"chatgpt","tokens":{"access_token":"eyJ...","refresh_token":"rt_...","account_id":"..."}}'></textarea>
+          </div>
+        </div>
+        <div class="validate-result" id="ft-validate-result"></div>
+        <div class="form-actions">
+          <button class="btn" onclick="validateToken()">Validate</button>
+          <button class="btn btn-green" onclick="addByToken()">Add Account</button>
+          <button class="btn" onclick="toggleAddForm()">Cancel</button>
+          <span id="ft-msg" style="font-size:13px;color:var(--muted)"></span>
+        </div>
+      </div>
+
+      <!-- Path tab -->
+      <div class="tab-content" id="tab-path">
+        <div class="form-grid">
+          <div class="form-group">
+            <label>ID *</label>
+            <input type="text" id="fp-id" placeholder="account_3">
+          </div>
+          <div class="form-group">
+            <label>Label</label>
+            <input type="text" id="fp-label" placeholder="Account Phụ 2">
+          </div>
+          <div class="form-group" style="grid-column:1/-1">
+            <label>Auth Path *</label>
+            <input type="text" id="fp-path" placeholder="~/.codex/auth_3.json">
+          </div>
+        </div>
+        <div class="validate-result" id="fp-validate-result"></div>
+        <div class="form-actions">
+          <button class="btn" onclick="validatePath()">Validate</button>
+          <button class="btn btn-green" onclick="addByPath()">Add Account</button>
+          <button class="btn" onclick="toggleAddForm()">Cancel</button>
+          <span id="fp-msg" style="font-size:13px;color:var(--muted)"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Table -->
+    <div id="accounts-table"><div class="loading">Loading...</div></div>
+  </div>
+
+  <!-- Discover Section -->
+  <div class="section">
+    <div class="section-header">
+      <h2>Discover Codex Accounts</h2>
+      <button class="btn" onclick="scanDiscover()">🔍 Scan Now</button>
+    </div>
+    <div id="discover-results" class="discover-section" style="display:none"></div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+function toast(msg, ok=true) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = `toast show ${ok?'ok':'fail'}`;
+  setTimeout(() => el.className = 'toast', 3000);
+}
+
+async function api(url, method='GET', body=null) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(url, opts);
+  return r.json();
+}
+
+function humanTime(secs) {
+  if (!secs || secs <= 0) return '';
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs/60)}m ${secs%60}s`;
+  const h = Math.floor(secs/3600);
+  const m = Math.floor((secs%3600)/60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function healthBadge(s) {
+  const h = s.health || 'unknown';
+  switch (h) {
+    case 'available': return '<span class="badge badge-green">available</span>';
+    case 'rate_limited': {
+      const t = humanTime(s.rate_limit_remaining_secs);
+      return `<span class="badge badge-red">\u23f1 rate limited</span>${t ? `<br><small style="color:var(--red);font-size:11px">reset in <strong>${t}</strong></small>` : ''}`;
+    }
+    case 'cooling_down': {
+      const t = humanTime(s.cooldown_remaining_secs);
+      return `<span class="badge badge-yellow">cooling down</span>${t ? `<br><small style="color:var(--yellow);font-size:11px">recovers in <strong>${t}</strong></small>` : ''}`;
+    }
+    case 'auth_expired': return '<span class="badge badge-red">auth expired</span>';
+    case 'disabled': return '<span class="badge badge-muted">disabled</span>';
+    default: return '<span class="badge badge-muted">unknown</span>';
+  }
+}
+
+function planBadge(p) {
+  if (!p || p === 'unknown') return '<span style="color:var(--muted)">—</span>';
+  const colors = { team: '--accent', plus: '--green', pro: '--green', free: '--muted', api_key: '--yellow' };
+  const c = colors[p] || '--muted';
+  return `<span class="badge" style="background:rgba(88,166,255,.12);color:var(${c})">${p}</span>`;
+}
+
+function dot(s) {
+  const h = s.health || 'unknown';
+  if (h === 'disabled') return '<span class="dot dot-muted"></span>';
+  if (h === 'rate_limited' || h === 'auth_expired') return '<span class="dot" style="background:var(--red)"></span>';
+  if (h === 'cooling_down') return '<span class="dot dot-yellow"></span>';
+  if (h === 'available') return '<span class="dot dot-green"></span>';
+  return '<span class="dot dot-muted"></span>';
+}
+
+function ago(secs) {
+  if (secs == null) return '—';
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
+  return `${Math.floor(secs/3600)}h ago`;
+}
+
+async function load() {
+  try {
+    const d = await api('/api/accounts');
+    const accounts = d.data || [];
+    const available = accounts.filter(a => a.status.health === 'available').length;
+    const rateLimited = accounts.filter(a => a.status.health === 'rate_limited').length;
+    const coolingDown = accounts.filter(a => a.status.health === 'cooling_down').length;
+    const disabled = accounts.filter(a => a.status.health === 'disabled').length;
+    document.getElementById('st-total').textContent = accounts.length;
+    document.getElementById('st-active').textContent = available;
+    document.getElementById('st-ratelimited').textContent = rateLimited;
+    document.getElementById('st-degraded').textContent = coolingDown;
+    document.getElementById('st-disabled').textContent = disabled;
+
+    if (accounts.length === 0) {
+      document.getElementById('accounts-table').innerHTML = `
+        <div class="loading">No accounts. Click "Add Account" to get started.<br>
+        <small style="color:var(--muted);margin-top:8px;display:block">Or create an accounts.toml file and restart.</small></div>`;
+      return;
+    }
+
+    document.getElementById('accounts-table').innerHTML = `
+      <table>
+        <thead><tr><th>Account</th><th>Plan</th><th>Email</th><th>Health</th><th>Requests</th><th>Errors</th><th>Last Used</th><th>Actions</th></tr></thead>
+        <tbody>${accounts.map(a => `
+          <tr>
+            <td>${dot(a.status)}<strong>${a.label}</strong><br><small style="color:var(--muted)">${a.id}</small></td>
+            <td>${planBadge(a.status.plan_type)}</td>
+            <td style="font-size:12px;color:var(--muted);max-width:160px;overflow:hidden;text-overflow:ellipsis" title="${a.status.email||''}">${a.status.email || '—'}</td>
+            <td>${healthBadge(a.status)}${a.status.last_error ? `<br><small style="color:var(--red);font-size:11px" title="${a.status.last_error}">⚠ ${a.status.last_error.slice(0,40)}...</small>` : ''}${a.status.token_expires_at ? `<br><small style="color:var(--muted);font-size:10px">token exp: ${new Date(a.status.token_expires_at*1000).toLocaleString()}</small>` : ''}</td>
+            <td>${a.status.total_requests}</td>
+            <td>${a.status.error_count}${a.status.consecutive_errors > 0 ? `<br><small style="color:var(--yellow)">${a.status.consecutive_errors} consecutive</small>` : ''}</td>
+            <td style="color:var(--muted)">${ago(a.status.last_used_secs_ago)}</td>
+            <td>
+              <div class="btn-group">
+                <button class="btn btn-sm btn-yellow" onclick="toggle('${a.id}')">${a.status.enabled ? 'Disable' : 'Enable'}</button>
+                <button class="btn btn-sm" onclick="reset('${a.id}')">Reset</button>
+                <button class="btn btn-sm btn-red" onclick="remove('${a.id}')">Remove</button>
+              </div>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+  } catch(e) {
+    document.getElementById('accounts-table').innerHTML = `<div class="loading" style="color:var(--red)">Error: ${e.message}</div>`;
+  }
+}
+
+async function toggle(id) {
+  const d = await api(`/api/accounts/${id}/toggle`, 'PATCH');
+  if (d.ok) { toast(`Account ${id} is now ${d.data ? 'enabled' : 'disabled'}`); load(); }
+  else toast(d.error, false);
+}
+
+async function reset(id) {
+  const d = await api(`/api/accounts/${id}/reset`, 'POST');
+  if (d.ok) { toast(`Reset ${id} — errors cleared`); load(); }
+  else toast(d.error, false);
+}
+
+async function remove(id) {
+  if (!confirm(`Remove account "${id}"? This cannot be undone.`)) return;
+  const d = await api(`/api/accounts/${id}`, 'DELETE');
+  if (d.ok) { toast(`Removed ${id}`); load(); }
+  else toast(d.error, false);
+}
+
+function toggleAddForm() {
+  const f = document.getElementById('add-form');
+  f.classList.toggle('open');
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  if (tab === 'token') {
+    document.querySelectorAll('.tab')[0].classList.add('active');
+    document.getElementById('tab-token').classList.add('active');
+  } else {
+    document.querySelectorAll('.tab')[1].classList.add('active');
+    document.getElementById('tab-path').classList.add('active');
+  }
+}
+
+async function validateToken() {
+  const rawJson = document.getElementById('ft-json').value.trim();
+  const el = document.getElementById('ft-validate-result');
+  if (!rawJson) { el.innerHTML = '<span style="color:var(--red)">Paste auth.json content</span>'; el.classList.add('show'); return; }
+  try { JSON.parse(rawJson); } catch(e) { el.innerHTML = `<span style="color:var(--red)">Invalid JSON: ${e.message}</span>`; el.classList.add('show'); return; }
+  el.innerHTML = 'Validating...'; el.classList.add('show');
+  try {
+    const d = await api('/api/accounts/validate', 'POST', { token: { raw_json: rawJson } });
+    if (d.ok && d.data) {
+      const v = d.data;
+      el.innerHTML = v.valid
+        ? `✅ <strong>Valid</strong> — Plan: <span class="badge" style="background:rgba(88,166,255,.12);color:var(--accent)">${v.plan_type}</span> Email: ${v.email||'—'} Expires: ${v.token_expires_at ? new Date(v.token_expires_at*1000).toLocaleString() : '—'}${v.token_expired ? ' <span style="color:var(--red)">⚠ EXPIRED</span>' : ''}`
+        : `❌ <strong>Invalid</strong> — Could not parse token`;
+    } else {
+      el.innerHTML = `<span style="color:var(--red)">${d.error||'Validation failed'}</span>`;
+    }
+  } catch(e) { el.innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`; }
+}
+
+async function validatePath() {
+  const path = document.getElementById('fp-path').value.trim();
+  const el = document.getElementById('fp-validate-result');
+  if (!path) { el.innerHTML = '<span style="color:var(--red)">Auth path required</span>'; el.classList.add('show'); return; }
+  el.innerHTML = 'Validating...'; el.classList.add('show');
+  try {
+    const d = await api('/api/accounts/validate', 'POST', { auth_path: path });
+    if (d.ok && d.data) {
+      const v = d.data;
+      el.innerHTML = v.valid
+        ? `✅ <strong>Valid</strong> — Plan: <span class="badge" style="background:rgba(88,166,255,.12);color:var(--accent)">${v.plan_type}</span> Email: ${v.email||'—'} Expires: ${v.token_expires_at ? new Date(v.token_expires_at*1000).toLocaleString() : '—'}${v.token_expired ? ' <span style="color:var(--red)">⚠ EXPIRED</span>' : ''}`
+        : `❌ <strong>Invalid</strong> — ${v.error||'Could not parse auth file'}`;
+    } else {
+      el.innerHTML = `<span style="color:var(--red)">${d.error||'Validation failed'}</span>`;
+    }
+  } catch(e) { el.innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`; }
+}
+
+async function addByToken() {
+  const id = document.getElementById('ft-id').value.trim();
+  const label = document.getElementById('ft-label').value.trim();
+  const rawJson = document.getElementById('ft-json').value.trim();
+  const msg = document.getElementById('ft-msg');
+  if (!id || !rawJson) { msg.textContent = 'ID and auth JSON required'; msg.style.color = 'var(--red)'; return; }
+  try { JSON.parse(rawJson); } catch(e) { msg.textContent = `Invalid JSON: ${e.message}`; msg.style.color = 'var(--red)'; return; }
+  msg.textContent = 'Adding...'; msg.style.color = 'var(--muted)';
+  const d = await api('/api/accounts', 'POST', { id, label: label||undefined, token: { raw_json: rawJson } });
+  if (d.ok) {
+    toast('Account added!'); toggleAddForm();
+    ['ft-id','ft-label','ft-json'].forEach(x => document.getElementById(x).value = '');
+    msg.textContent = ''; load();
+  } else { msg.textContent = d.error; msg.style.color = 'var(--red)'; }
+}
+
+async function addByPath() {
+  const id = document.getElementById('fp-id').value.trim();
+  const label = document.getElementById('fp-label').value.trim();
+  const auth_path = document.getElementById('fp-path').value.trim();
+  const msg = document.getElementById('fp-msg');
+  if (!id || !auth_path) { msg.textContent = 'ID and Auth Path required'; msg.style.color = 'var(--red)'; return; }
+  msg.textContent = 'Adding...'; msg.style.color = 'var(--muted)';
+  const d = await api('/api/accounts', 'POST', { id, label: label||undefined, auth_path });
+  if (d.ok) {
+    toast('Account added!'); toggleAddForm();
+    ['fp-id','fp-label','fp-path'].forEach(x => document.getElementById(x).value = '');
+    msg.textContent = ''; load();
+  } else { msg.textContent = d.error; msg.style.color = 'var(--red)'; }
+}
+
+async function scanDiscover() {
+  const el = document.getElementById('discover-results');
+  el.style.display = 'block';
+  el.innerHTML = '<div class="loading">Scanning...</div>';
+  try {
+    const d = await api('/api/accounts/sync', 'POST');
+    const items = d.data || [];
+    if (items.length === 0) {
+      el.innerHTML = '<div style="color:var(--muted);font-size:13px">No auth files found. If using OS keyring, use "Add by Token" instead.</div>';
+      return;
+    }
+    el.innerHTML = items.map(item => `
+      <div class="discover-item">
+        <div>
+          <div style="font-size:13px">${item.source}: <code style="font-size:12px;color:var(--accent)">${item.auth_path}</code></div>
+          <div class="discover-meta">
+            ${planBadge(item.plan_type)}
+            ${item.email ? `· ${item.email}` : ''}
+            ${item.token_expired ? '<span style="color:var(--red)"> · ⚠ expired</span>' : ''}
+            ${item.action ? `· <span style="color:var(--accent)">${item.action}</span>` : ''}
+          </div>
+        </div>
+        <div>
+          <span class="badge ${item.action === 'added' ? 'badge-green' : item.action === 'updated' ? 'badge-blue' : 'badge-muted'}">
+            ${item.action || 'unchanged'}
+          </span>
+        </div>
+      </div>
+    `).join('');
+    load();
+  } catch(e) { el.innerHTML = `<div style="color:var(--red)">Error: ${e.message}</div>`; }
+}
+
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>

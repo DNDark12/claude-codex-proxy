@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::jobs::{JobExecutor, registry::JobRegistry};
+use crate::jobs::{registry::JobRegistry, JobExecutor};
 use crate::mapping::review::ReviewRequest;
 use crate::surfaces::model::MappingStrategy;
 
@@ -90,7 +90,10 @@ mod tests {
         assert_eq!(result.strategy, MappingStrategy::UnsupportedExplicit);
         assert!(!result.success);
         assert!(result.message.contains("not supported"));
-        assert_eq!(result.data["unsupported_reason"], "missing_backend_primitive");
+        assert_eq!(
+            result.data["unsupported_reason"],
+            "missing_backend_primitive"
+        );
     }
 
     #[tokio::test]

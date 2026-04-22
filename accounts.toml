@@ -1,0 +1,19 @@
+[[account]]
+id = "default"
+label = "huy.d"
+auth_path = "/Users/DNDark/.codex/auth.json"
+enabled = true
+
+[[account]]
+id = "l"
+auth_path = "/Users/DNDark/.codex/proxy-accounts/l/auth.json"
+enabled = true
+
+[[account]]
+id = "l2"
+auth_path = "/Users/DNDark/.codex/proxy-accounts/l2/auth.json"
+enabled = true
+
+[pool]
+error_threshold = 3
+cooldown_secs = 120

@@ -67,7 +67,7 @@ impl DispatchPlanner {
     ) -> DispatchPlan {
         Self::plan_core(
             request.stream.unwrap_or(false),
-            has_task_runtime_surface(surfaces),
+            has_explicit_detached_surface(surfaces),
             mode,
             app_server_available,
         )
@@ -82,30 +82,21 @@ impl DispatchPlanner {
     ) -> DispatchPlan {
         Self::plan_core(
             request.stream.unwrap_or(false),
-            has_task_runtime_surface(surfaces),
+            has_explicit_detached_surface(surfaces),
             mode,
             app_server_available,
         )
     }
 }
 
-fn has_task_runtime_surface(surfaces: &[ClassifiedSurface]) -> bool {
+fn has_explicit_detached_surface(surfaces: &[ClassifiedSurface]) -> bool {
     surfaces.iter().any(|surface| {
+        if surface.kind != "command" {
+            return false;
+        }
         matches!(
             surface.surface_id.as_deref(),
-            Some("tool.taskcreate")
-                | Some("tool.taskget")
-                | Some("tool.tasklist")
-                | Some("tool.taskupdate")
-                | Some("tool.taskstop")
-                | Some("tool.agent")
-                | Some("tool.sendmessage")
-                | Some("workflow.code_review")
-                | Some("workflow.security_review")
-                | Some("workflow.rescue_fix")
-                | Some("command.tasks")
-                | Some("command.security_review")
-                | Some("command.resume")
+            Some("command.tasks") | Some("command.security_review") | Some("command.resume")
         )
     })
 }
@@ -142,7 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_task_surface_prefers_detached_background() {
+    fn anthropic_broad_tool_inventory_stays_attached_for_plain_chat() {
         let registry = SurfaceRegistry::new();
         let classifier = SurfaceClassifier::new(registry.clone());
         let matrix = CompatibilityMatrix::new(&registry);
@@ -150,8 +141,39 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "model": "gpt-5.4",
                 "stream": true,
-                "tools": [{ "name": "TaskCreate", "input_schema": { "type": "object" } }],
-                "messages": [{ "role": "user", "content": "create a background task" }]
+                "tools": [
+                    { "name": "Read", "input_schema": { "type": "object" } },
+                    { "name": "TaskCreate", "input_schema": { "type": "object" } },
+                    { "name": "TaskUpdate", "input_schema": { "type": "object" } },
+                    { "name": "Agent", "input_schema": { "type": "object" } },
+                    { "name": "SendMessage", "input_schema": { "type": "object" } }
+                ],
+                "messages": [{ "role": "user", "content": "hi" }]
+            }))
+            .unwrap();
+
+        let plan = DispatchPlanner::plan_anthropic(
+            &request,
+            &classifier.classify_anthropic_request(&request),
+            OperationMode::AutoHybrid,
+            true,
+            &matrix,
+        );
+
+        assert_eq!(plan.backend, DispatchBackend::AppServer);
+        assert_eq!(plan.execution_mode, ExecutionMode::AttachedStream);
+    }
+
+    #[test]
+    fn anthropic_explicit_task_command_prefers_detached_background() {
+        let registry = SurfaceRegistry::new();
+        let classifier = SurfaceClassifier::new(registry.clone());
+        let matrix = CompatibilityMatrix::new(&registry);
+        let request: crate::domain::anthropic::AnthropicMessagesRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "gpt-5.4",
+                "stream": true,
+                "messages": [{ "role": "user", "content": "/tasks" }]
             }))
             .unwrap();
 

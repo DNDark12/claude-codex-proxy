@@ -19,19 +19,23 @@ async fn streaming_request_uses_app_server_without_responses_fallback() {
         sessions.clone(),
     );
 
-    let routes = claude_codex_proxy::routes::build_routes(claude_codex_proxy::routes::RouteBuildOptions {
-        client: None,
-        app_server: Some(app_server),
-        executor: Some(executor),
-        skill_registry: None,
-        surface_registry,
-        compatibility_matrix,
-        job_registry: jobs,
-        state_store: sessions,
-        operation_mode: claude_codex_proxy::surfaces::OperationMode::AutoHybrid,
-        api_stability: claude_codex_proxy::app_server::ApiStability::Stable,
-        delegation_policy: claude_codex_proxy::app_server::DelegationPolicy::ExplicitOnly,
-    });
+    let routes =
+        claude_codex_proxy::routes::build_routes(claude_codex_proxy::routes::RouteBuildOptions {
+            client: None,
+            app_server: Some(app_server),
+            executor: Some(executor),
+            default_auth_path: std::env::var("PROXY_AUTH_PATH")
+                .unwrap_or_else(|_| "~/.codex/auth.json".to_string()),
+            skill_registry: None,
+            surface_registry,
+            compatibility_matrix,
+            job_registry: jobs,
+            state_store: sessions,
+            operation_mode: claude_codex_proxy::surfaces::OperationMode::AutoHybrid,
+            api_stability: claude_codex_proxy::app_server::ApiStability::Stable,
+            delegation_policy: claude_codex_proxy::app_server::DelegationPolicy::ExplicitOnly,
+            pool: claude_codex_proxy::accounts::load_pool(),
+        });
 
     let (addr, server) = warp::serve(routes).bind_ephemeral(([127, 0, 0, 1], 0));
     tokio::spawn(server);
@@ -89,6 +93,10 @@ async fn detached_job_remains_running_after_initial_request_scope() {
             input: vec![claude_codex_proxy::app_server::UserInput::Text {
                 text: "Sleep briefly and then answer done.".to_string(),
             }],
+            existing_thread_id: None,
+            client_session_id: None,
+            account_id: None,
+            account_auth_path: None,
         })
         .await
         .unwrap();

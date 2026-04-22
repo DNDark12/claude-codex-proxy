@@ -269,13 +269,19 @@ mod tests {
     #[test]
     fn map_multiedit_warns_atomicity() {
         let result = map_multiedit(&test_thread(), vec![]);
-        assert!(result.warnings.iter().any(|w| w.warning.contains("Atomicity")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.warning.contains("Atomicity")));
     }
 
     #[test]
     fn map_edit_warns_protected_path() {
         let result = map_edit(&test_thread(), ".git/config", serde_json::json!({}));
-        assert!(result.warnings.iter().any(|w| w.warning.contains("Protected")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.warning.contains("Protected")));
     }
 
     #[test]
@@ -287,7 +293,10 @@ mod tests {
     #[test]
     fn map_tool_search_warns_partial() {
         let result = map_tool_search("test");
-        assert!(result.warnings.iter().any(|w| w.warning.contains("partial")));
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.warning.contains("partial")));
     }
 
     // P5-T04: WebFetch works where runtime exposes it

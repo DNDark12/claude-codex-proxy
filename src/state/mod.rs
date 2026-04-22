@@ -1,5 +1,6 @@
 pub mod guidance;
 pub mod permissions;
+pub mod persistence;
 pub mod store;
 
 pub use guidance::GuidanceStore;

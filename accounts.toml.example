@@ -1,0 +1,15 @@
+[pool]
+error_threshold = 3
+cooldown_secs = 120
+
+[[account]]
+id = "account_1"
+label = "Account 1"
+auth_path = "~/.codex/auth.json"
+enabled = true
+
+[[account]]
+id = "account_2"
+label = "Account 2"
+auth_path = "~/.codex/proxy-accounts/account_2/auth.json"
+enabled = true

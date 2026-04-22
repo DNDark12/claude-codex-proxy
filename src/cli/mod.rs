@@ -138,9 +138,7 @@ impl RuntimeArgs {
         RuntimeConfig {
             port: resolve_port(self.port),
             auth_path: resolve_auth_path(self.auth_path.clone()),
-            skills_registry_path: resolve_skills_registry_path(
-                self.skills_registry_path.clone(),
-            ),
+            skills_registry_path: resolve_skills_registry_path(self.skills_registry_path.clone()),
             operation_mode: match self.mode {
                 CliOperationMode::StrictAppServer => OperationMode::StrictAppServer,
                 CliOperationMode::AutoHybrid => OperationMode::AutoHybrid,

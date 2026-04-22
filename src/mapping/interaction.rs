@@ -121,13 +121,19 @@ mod tests {
     #[test]
     fn ask_user_is_clarification_not_approval() {
         let result = classify_interaction(&ask_user_event());
-        assert!(matches!(result, Some(InteractionClassification::Clarification(_))));
+        assert!(matches!(
+            result,
+            Some(InteractionClassification::Clarification(_))
+        ));
     }
 
     #[test]
     fn approval_event_is_approval_not_clarification() {
         let result = classify_interaction(&approval_event());
-        assert!(matches!(result, Some(InteractionClassification::Approval(_))));
+        assert!(matches!(
+            result,
+            Some(InteractionClassification::Approval(_))
+        ));
     }
 
     #[test]

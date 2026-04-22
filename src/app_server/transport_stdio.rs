@@ -300,12 +300,17 @@ fn parse_id(value: &Value) -> RequestId {
 }
 
 fn request_timeout() -> Duration {
-    let seconds = std::env::var("CLAUDE_CODEX_PROXY_JSONRPC_TIMEOUT_SECS")
+    let seconds = env_seconds("CLAUDE_CODEX_PROXY_JSONRPC_TIMEOUT_SECS")
+        .or_else(|| env_seconds("APP_SERVER_TURN_TIMEOUT_SECS"))
+        .unwrap_or(45);
+    Duration::from_secs(seconds)
+}
+
+fn env_seconds(name: &str) -> Option<u64> {
+    std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(45);
-    Duration::from_secs(seconds)
 }
 
 #[cfg(test)]

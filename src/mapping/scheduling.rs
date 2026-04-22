@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::jobs::model::{JobKind, JobRecord, JobStatus, SchedulerMode, SchedulingSurface};
+use crate::jobs::model::{
+    unix_timestamp_now, JobKind, JobRecord, JobStatus, SchedulerMode, SchedulingSurface,
+};
 use crate::jobs::registry::JobRegistry;
 use crate::mapping::tools::ToolWarning;
 use crate::surfaces::model::MappingStrategy;
@@ -64,7 +66,14 @@ pub async fn map_cron_create(
         codex_turn_id: None,
         codex_agent_ids: Vec::new(),
         worktree_path: None,
-        result_summary: Some(format!("schedule={} prompt={}", request.schedule, request.prompt)),
+        account_id: None,
+        account_auth_path: None,
+        created_at: unix_timestamp_now(),
+        finished_at: None,
+        result_summary: Some(format!(
+            "schedule={} prompt={}",
+            request.schedule, request.prompt
+        )),
         warnings: warnings.iter().map(|w| w.warning.clone()).collect(),
         error_message: None,
     };
@@ -115,10 +124,15 @@ mod tests {
     async fn cron_create_session_scoped() {
         let registry = JobRegistry::default();
         let result = map_cron_create(
-            CronCreateRequest { schedule: "*/5 * * * *".to_string(), prompt: "check".to_string(), durable: None },
+            CronCreateRequest {
+                schedule: "*/5 * * * *".to_string(),
+                prompt: "check".to_string(),
+                durable: None,
+            },
             "sess-1",
             &registry,
-        ).await;
+        )
+        .await;
         assert_eq!(result.scheduler_mode, SchedulingSurface::SessionCron);
         assert!(result.warnings.is_empty());
     }
@@ -128,10 +142,15 @@ mod tests {
     async fn cron_create_durable_warns() {
         let registry = JobRegistry::default();
         let result = map_cron_create(
-            CronCreateRequest { schedule: "0 * * * *".to_string(), prompt: "deploy".to_string(), durable: Some(true) },
+            CronCreateRequest {
+                schedule: "0 * * * *".to_string(),
+                prompt: "deploy".to_string(),
+                durable: Some(true),
+            },
             "sess-1",
             &registry,
-        ).await;
+        )
+        .await;
         assert_eq!(result.scheduler_mode, SchedulingSurface::DurableRoutine);
         assert!(!result.warnings.is_empty());
         assert!(result.warnings[0].warning.contains("DurableAutomation"));
@@ -141,10 +160,15 @@ mod tests {
     async fn cron_list_and_delete() {
         let registry = JobRegistry::default();
         let result = map_cron_create(
-            CronCreateRequest { schedule: "* * * * *".to_string(), prompt: "x".to_string(), durable: None },
+            CronCreateRequest {
+                schedule: "* * * * *".to_string(),
+                prompt: "x".to_string(),
+                durable: None,
+            },
             "sess-1",
             &registry,
-        ).await;
+        )
+        .await;
         assert_eq!(map_cron_list(&registry).await.len(), 1);
         let deleted = map_cron_delete(&result.job_id, &registry).await.unwrap();
         assert_eq!(deleted.status, JobStatus::Cancelled);

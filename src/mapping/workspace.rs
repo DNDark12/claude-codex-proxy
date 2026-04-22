@@ -170,7 +170,13 @@ mod tests {
         assert!(result.warnings[0].warning.contains("Hybrid"));
 
         // Store association
-        store.associate(&thread.thread_id, result.worktree_path.as_ref().unwrap(), Some("feature-x")).await;
+        store
+            .associate(
+                &thread.thread_id,
+                result.worktree_path.as_ref().unwrap(),
+                Some("feature-x"),
+            )
+            .await;
         let assoc = store.get(&thread.thread_id).await.unwrap();
         assert!(assoc.active);
         assert_eq!(assoc.branch.as_deref(), Some("feature-x"));
@@ -180,20 +186,27 @@ mod tests {
     #[tokio::test]
     async fn resume_maps_to_thread_resume() {
         let sessions = StateStore::default();
-        sessions.insert_session(crate::app_server::BridgeSession {
-            bridge_session_id: "s1".to_string(),
-            claude_session_id: None,
-            thread: test_thread(),
-            transport: crate::app_server::TransportKind::Stdio,
-            operation_mode: crate::surfaces::OperationMode::AutoHybrid,
-            api_stability: crate::app_server::ApiStability::Stable,
-            delegation_policy: crate::app_server::DelegationPolicy::ExplicitOnly,
-            active_guidance_layers: Vec::new(),
-            active_skills: Vec::new(),
-            active_jobs: Vec::new(),
-            state_version: 1,
-        }).await;
-        let result = map_resume("t1", &JobRegistry::default(), &sessions).await.unwrap();
+        sessions
+            .insert_session(crate::app_server::BridgeSession {
+                bridge_session_id: "s1".to_string(),
+                claude_session_id: None,
+                account_id: None,
+                account_auth_path: None,
+                last_assistant_message: None,
+                thread: test_thread(),
+                transport: crate::app_server::TransportKind::Stdio,
+                operation_mode: crate::surfaces::OperationMode::AutoHybrid,
+                api_stability: crate::app_server::ApiStability::Stable,
+                delegation_policy: crate::app_server::DelegationPolicy::ExplicitOnly,
+                active_guidance_layers: Vec::new(),
+                active_skills: Vec::new(),
+                active_jobs: Vec::new(),
+                state_version: 1,
+            })
+            .await;
+        let result = map_resume("t1", &JobRegistry::default(), &sessions)
+            .await
+            .unwrap();
         assert_eq!(result.strategy, MappingStrategy::MediatedNative);
         assert_eq!(result.thread_id, "t1");
     }
@@ -217,7 +230,9 @@ mod tests {
     #[tokio::test]
     async fn worktree_store_preserves_state_across_operations() {
         let store = WorktreeStore::default();
-        store.associate("t1", "/project/.worktrees/fix", Some("fix")).await;
+        store
+            .associate("t1", "/project/.worktrees/fix", Some("fix"))
+            .await;
         let assoc = store.get("t1").await.unwrap();
         assert_eq!(assoc.worktree_path, "/project/.worktrees/fix");
         assert!(assoc.active);

@@ -5,22 +5,22 @@
 //!
 //! Tests NOT marked ignore run as unit-level golden fixture validation.
 
+use claude_codex_proxy::app_server::events::{AppServerEvent, AppServerEventKind};
+use claude_codex_proxy::app_server::session::DelegationPolicy;
+use claude_codex_proxy::app_server::thread::BridgeThread;
+use claude_codex_proxy::jobs::model::*;
+use claude_codex_proxy::jobs::registry::JobRegistry;
 use claude_codex_proxy::mapping::approvals::*;
-use claude_codex_proxy::mapping::interaction::*;
-use claude_codex_proxy::mapping::tools::*;
-use claude_codex_proxy::mapping::tasks::*;
-use claude_codex_proxy::mapping::subagents::*;
-use claude_codex_proxy::mapping::review::*;
-use claude_codex_proxy::mapping::planning::*;
-use claude_codex_proxy::mapping::workspace::*;
-use claude_codex_proxy::mapping::scheduling::*;
 use claude_codex_proxy::mapping::commands::*;
 use claude_codex_proxy::mapping::guidance::*;
-use claude_codex_proxy::app_server::thread::BridgeThread;
-use claude_codex_proxy::app_server::session::DelegationPolicy;
-use claude_codex_proxy::app_server::events::{AppServerEvent, AppServerEventKind};
-use claude_codex_proxy::jobs::registry::JobRegistry;
-use claude_codex_proxy::jobs::model::*;
+use claude_codex_proxy::mapping::interaction::*;
+use claude_codex_proxy::mapping::planning::*;
+use claude_codex_proxy::mapping::review::*;
+use claude_codex_proxy::mapping::scheduling::*;
+use claude_codex_proxy::mapping::subagents::*;
+use claude_codex_proxy::mapping::tasks::*;
+use claude_codex_proxy::mapping::tools::*;
+use claude_codex_proxy::mapping::workspace::*;
 use claude_codex_proxy::surfaces::model::MappingStrategy;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -100,8 +100,8 @@ async fn p1_t01_app_server_full_lifecycle() {
 
     assert!(!turn.turn_id.is_empty());
 
-    let events = client
-        .collect_text_deltas(&thread.thread_id, &turn.turn_id, client.subscribe_events());
+    let events =
+        client.collect_text_deltas(&thread.thread_id, &turn.turn_id, client.subscribe_events());
     let events = tokio::time::timeout(std::time::Duration::from_secs(45), events)
         .await
         .expect("timed out waiting for turn completion")
@@ -160,8 +160,7 @@ async fn p1_t02_approval_pause_and_resume() {
 
     // Listen for approval request via server-initiated request
     let mut rx = client.subscribe_server_requests();
-    if let Ok(Ok(req)) = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await
-    {
+    if let Ok(Ok(req)) = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv()).await {
         // Approve it
         client
             .respond_to_server_request(
@@ -354,9 +353,16 @@ async fn regression_tier1_task_lifecycle() {
     let reg = JobRegistry::default();
     let t = test_thread();
     let created = map_task_create(
-        TaskCreateRequest { description: "test".into(), instructions: None, cwd: None },
-        &t, None, &reg,
-    ).await;
+        TaskCreateRequest {
+            description: "test".into(),
+            instructions: None,
+            cwd: None,
+        },
+        &t,
+        None,
+        &reg,
+    )
+    .await;
     assert_eq!(created.status, JobStatus::Queued);
     assert!(map_task_get(&created.job_id, &reg).await.is_some());
     assert_eq!(map_task_list(&reg).await.len(), 1);
@@ -369,15 +375,29 @@ async fn regression_tier1_agent_delegation() {
     let reg = JobRegistry::default();
     let t = test_thread();
     let allowed = map_agent_spawn(
-        AgentSpawnRequest { task: "x".into(), cwd: None },
-        &t, &DelegationPolicy::ExplicitOnly, None, &reg,
-    ).await;
+        AgentSpawnRequest {
+            task: "x".into(),
+            cwd: None,
+        },
+        &t,
+        &DelegationPolicy::ExplicitOnly,
+        None,
+        &reg,
+    )
+    .await;
     assert!(allowed.allowed);
 
     let denied = map_agent_spawn(
-        AgentSpawnRequest { task: "y".into(), cwd: None },
-        &t, &DelegationPolicy::Never, None, &reg,
-    ).await;
+        AgentSpawnRequest {
+            task: "y".into(),
+            cwd: None,
+        },
+        &t,
+        &DelegationPolicy::Never,
+        None,
+        &reg,
+    )
+    .await;
     assert!(!denied.allowed);
 }
 
@@ -385,9 +405,15 @@ async fn regression_tier1_agent_delegation() {
 async fn regression_tier1_review() {
     let reg = JobRegistry::default();
     let r = map_code_review(
-        ReviewRequest { scope: None, files: None, instructions: None },
-        None, &reg,
-    ).await;
+        ReviewRequest {
+            scope: None,
+            files: None,
+            instructions: None,
+        },
+        None,
+        &reg,
+    )
+    .await;
     let cancelled = map_review_cancel(&r.job_id, &reg).await.unwrap();
     assert_eq!(cancelled.status, JobStatus::Cancelled);
 }
@@ -398,19 +424,29 @@ fn regression_tier1_interaction_classification() {
         method: "terminal_interaction".into(),
         kind: AppServerEventKind::TerminalInteraction,
         params: serde_json::json!({"action": "ask_user", "question": "?"}),
-        thread_id: Some("t".into()), turn_id: Some("u".into()),
-        item_id: None, delta: None,
+        thread_id: Some("t".into()),
+        turn_id: Some("u".into()),
+        item_id: None,
+        delta: None,
     };
-    assert!(matches!(classify_interaction(&ask), Some(InteractionClassification::Clarification(_))));
+    assert!(matches!(
+        classify_interaction(&ask),
+        Some(InteractionClassification::Clarification(_))
+    ));
 
     let approval = AppServerEvent {
         method: "terminal_interaction".into(),
         kind: AppServerEventKind::TerminalInteraction,
         params: serde_json::json!({"action": "approval_request", "description": "write"}),
-        thread_id: Some("t".into()), turn_id: Some("u".into()),
-        item_id: None, delta: None,
+        thread_id: Some("t".into()),
+        turn_id: Some("u".into()),
+        item_id: None,
+        delta: None,
     };
-    assert!(matches!(classify_interaction(&approval), Some(InteractionClassification::Approval(_))));
+    assert!(matches!(
+        classify_interaction(&approval),
+        Some(InteractionClassification::Approval(_))
+    ));
 }
 
 // Tier 2 fixtures
@@ -433,19 +469,24 @@ fn regression_tier2_rewind() {
 #[tokio::test]
 async fn regression_tier2_resume() {
     let sessions = claude_codex_proxy::state::StateStore::default();
-    sessions.insert_session(claude_codex_proxy::app_server::BridgeSession {
-        bridge_session_id: "integration-session".to_string(),
-        claude_session_id: None,
-        thread: test_thread(),
-        transport: claude_codex_proxy::app_server::TransportKind::Stdio,
-        operation_mode: claude_codex_proxy::surfaces::OperationMode::AutoHybrid,
-        api_stability: claude_codex_proxy::app_server::ApiStability::Stable,
-        delegation_policy: claude_codex_proxy::app_server::DelegationPolicy::ExplicitOnly,
-        active_guidance_layers: Vec::new(),
-        active_skills: Vec::new(),
-        active_jobs: Vec::new(),
-        state_version: 1,
-    }).await;
+    sessions
+        .insert_session(claude_codex_proxy::app_server::BridgeSession {
+            bridge_session_id: "integration-session".to_string(),
+            claude_session_id: None,
+            account_id: None,
+            account_auth_path: None,
+            last_assistant_message: None,
+            thread: test_thread(),
+            transport: claude_codex_proxy::app_server::TransportKind::Stdio,
+            operation_mode: claude_codex_proxy::surfaces::OperationMode::AutoHybrid,
+            api_stability: claude_codex_proxy::app_server::ApiStability::Stable,
+            delegation_policy: claude_codex_proxy::app_server::DelegationPolicy::ExplicitOnly,
+            active_guidance_layers: Vec::new(),
+            active_skills: Vec::new(),
+            active_jobs: Vec::new(),
+            state_version: 1,
+        })
+        .await;
     let r = map_resume("integration-thread", &JobRegistry::default(), &sessions)
         .await
         .unwrap();
@@ -457,16 +498,28 @@ async fn regression_tier2_resume() {
 async fn regression_tier3_cron() {
     let reg = JobRegistry::default();
     let ephemeral = map_cron_create(
-        CronCreateRequest { schedule: "* * * * *".into(), prompt: "x".into(), durable: None },
-        "s1", &reg,
-    ).await;
+        CronCreateRequest {
+            schedule: "* * * * *".into(),
+            prompt: "x".into(),
+            durable: None,
+        },
+        "s1",
+        &reg,
+    )
+    .await;
     assert_eq!(ephemeral.scheduler_mode, SchedulingSurface::SessionCron);
     assert!(ephemeral.warnings.is_empty());
 
     let durable = map_cron_create(
-        CronCreateRequest { schedule: "0 * * * *".into(), prompt: "y".into(), durable: Some(true) },
-        "s1", &reg,
-    ).await;
+        CronCreateRequest {
+            schedule: "0 * * * *".into(),
+            prompt: "y".into(),
+            durable: Some(true),
+        },
+        "s1",
+        &reg,
+    )
+    .await;
     assert_eq!(durable.scheduler_mode, SchedulingSurface::DurableRoutine);
     assert!(!durable.warnings.is_empty());
 }
@@ -514,11 +567,19 @@ fn regression_a04_ask_user_never_dispatched_as_approval() {
         method: "terminal_interaction".into(),
         kind: AppServerEventKind::TerminalInteraction,
         params: serde_json::json!({"action": "ask_user", "question": "which?"}),
-        thread_id: Some("t".into()), turn_id: Some("u".into()),
-        item_id: None, delta: None,
+        thread_id: Some("t".into()),
+        turn_id: Some("u".into()),
+        item_id: None,
+        delta: None,
     };
     let result = classify_interaction(&event);
-    assert!(matches!(result, Some(InteractionClassification::Clarification(_))));
+    assert!(matches!(
+        result,
+        Some(InteractionClassification::Clarification(_))
+    ));
     // Must NOT be approval
-    assert!(!matches!(result, Some(InteractionClassification::Approval(_))));
+    assert!(!matches!(
+        result,
+        Some(InteractionClassification::Approval(_))
+    ));
 }

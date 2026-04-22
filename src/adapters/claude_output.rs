@@ -2,8 +2,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::app_server::events::{AppServerEvent, AppServerEventKind};
-use crate::surfaces::model::{MappingDecision, MappingStrategy, OperationMode, SurfaceBucket, SurfaceDescriptor};
 use crate::app_server::session::ApiStability;
+use crate::surfaces::model::{
+    MappingDecision, MappingStrategy, OperationMode, SurfaceBucket, SurfaceDescriptor,
+};
 
 /// Bridge metadata attached to every response (P7-009).
 #[derive(Debug, Clone, Serialize)]
