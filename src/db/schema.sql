@@ -15,6 +15,25 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
 
+CREATE TABLE IF NOT EXISTS accounts (
+    id          TEXT PRIMARY KEY,
+    label       TEXT,
+    auth_path   TEXT NOT NULL UNIQUE,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_accounts_enabled ON accounts(enabled);
+CREATE INDEX IF NOT EXISTS idx_accounts_auth_path ON accounts(auth_path);
+
+CREATE TABLE IF NOT EXISTS account_pool_settings (
+    singleton        INTEGER PRIMARY KEY CHECK (singleton = 1),
+    error_threshold  INTEGER NOT NULL,
+    cooldown_secs    INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS jobs (
     id          TEXT PRIMARY KEY,
     session_id  TEXT,

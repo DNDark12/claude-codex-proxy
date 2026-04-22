@@ -2,6 +2,7 @@ pub mod admin;
 pub mod api;
 mod dispatch;
 use std::collections::HashMap;
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -441,7 +442,8 @@ async fn find_session_by_client_affinity(
     if let Some(client_session_id) = client_session_id {
         if let Some(session) = sessions
             .iter()
-            .find(|session| session.claude_session_id.as_deref() == Some(client_session_id))
+            .filter(|session| session.claude_session_id.as_deref() == Some(client_session_id))
+            .max_by(|left, right| compare_session_recency(left, right))
         {
             return Some(session.clone());
         }
@@ -451,12 +453,18 @@ async fn find_session_by_client_affinity(
     sessions
         .into_iter()
         .filter(|session| session.last_assistant_message.as_deref() == Some(last_assistant_message))
-        .max_by(|left, right| {
-            left.thread
-                .created_at_unix
-                .cmp(&right.thread.created_at_unix)
-                .then_with(|| left.thread.turn_count.cmp(&right.thread.turn_count))
-        })
+        .max_by(compare_session_recency)
+}
+
+fn compare_session_recency(
+    left: &crate::app_server::BridgeSession,
+    right: &crate::app_server::BridgeSession,
+) -> Ordering {
+    left.thread
+        .created_at_unix
+        .cmp(&right.thread.created_at_unix)
+        .then_with(|| left.thread.turn_count.cmp(&right.thread.turn_count))
+        .then_with(|| left.bridge_session_id.cmp(&right.bridge_session_id))
 }
 
 async fn resolve_anthropic_continuation_session(
@@ -2776,6 +2784,101 @@ enabled = true
             .await
             .expect("continuation session");
         assert_eq!(session.thread.thread_id, "thread-1");
+        assert_eq!(
+            session.account_auth_path.as_deref(),
+            Some("/tmp/account-1/auth.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_session_header_prefers_newest_session() {
+        let state = test_state();
+        state
+            .state_store
+            .insert_session(crate::app_server::BridgeSession {
+                bridge_session_id: "bridge-old".to_string(),
+                claude_session_id: Some("client-session-1".to_string()),
+                account_id: Some("account_legacy".to_string()),
+                account_auth_path: None,
+                last_assistant_message: Some("old".to_string()),
+                thread: crate::app_server::BridgeThread {
+                    thread_id: "thread-old".to_string(),
+                    bridge_session_id: "bridge-old".to_string(),
+                    cwd: "/tmp/project".to_string(),
+                    project_root: None,
+                    approval_policy: crate::mapping::approvals::ApprovalPolicy::OnRequest,
+                    sandbox_config: crate::mapping::approvals::SandboxConfig::WorkspaceWrite,
+                    created_at_unix: 1,
+                    turn_count: 1,
+                },
+                transport: crate::app_server::TransportKind::Stdio,
+                operation_mode: OperationMode::AutoHybrid,
+                api_stability: ApiStability::Stable,
+                delegation_policy: DelegationPolicy::ExplicitOnly,
+                active_guidance_layers: Vec::new(),
+                active_skills: Vec::new(),
+                active_jobs: Vec::new(),
+                state_version: 1,
+            })
+            .await;
+        state
+            .state_store
+            .insert_session(crate::app_server::BridgeSession {
+                bridge_session_id: "bridge-new".to_string(),
+                claude_session_id: Some("client-session-1".to_string()),
+                account_id: Some("account_1".to_string()),
+                account_auth_path: Some("/tmp/account-1/auth.json".to_string()),
+                last_assistant_message: Some("new".to_string()),
+                thread: crate::app_server::BridgeThread {
+                    thread_id: "thread-new".to_string(),
+                    bridge_session_id: "bridge-new".to_string(),
+                    cwd: "/tmp/project".to_string(),
+                    project_root: None,
+                    approval_policy: crate::mapping::approvals::ApprovalPolicy::OnRequest,
+                    sandbox_config: crate::mapping::approvals::SandboxConfig::WorkspaceWrite,
+                    created_at_unix: 2,
+                    turn_count: 4,
+                },
+                transport: crate::app_server::TransportKind::Stdio,
+                operation_mode: OperationMode::AutoHybrid,
+                api_stability: ApiStability::Stable,
+                delegation_policy: DelegationPolicy::ExplicitOnly,
+                active_guidance_layers: Vec::new(),
+                active_skills: Vec::new(),
+                active_jobs: Vec::new(),
+                state_version: 1,
+            })
+            .await;
+
+        let mut headers = warp::http::HeaderMap::new();
+        headers.insert(
+            "x-claude-session-id",
+            warp::http::HeaderValue::from_static("client-session-1"),
+        );
+        let request = ChatCompletionsRequest {
+            model: "gpt-5.4".to_string(),
+            messages: vec![crate::domain::openai::OpenAIMessage {
+                role: "user".to_string(),
+                content: Some(crate::domain::openai::OpenAIContent::Text(
+                    "continue".to_string(),
+                )),
+                tool_calls: None,
+                function_call: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            stream: Some(false),
+            tools: None,
+            tool_choice: None,
+            functions: None,
+            reasoning_effort: None,
+            response_format: None,
+        };
+
+        let session = resolve_openai_continuation_session(&state, &headers, &request)
+            .await
+            .expect("continuation session");
+        assert_eq!(session.thread.thread_id, "thread-new");
         assert_eq!(
             session.account_auth_path.as_deref(),
             Some("/tmp/account-1/auth.json")

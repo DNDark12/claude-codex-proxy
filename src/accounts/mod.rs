@@ -2,8 +2,8 @@
 //
 // Multi-account pool với round-robin rotation và health tracking.
 //
-// Config: accounts.toml (hoặc ACCOUNTS_CONFIG_PATH env var)
-// Format xem accounts.toml.example
+// Inventory persistence: SQLite (authoritative)
+// Legacy import: accounts.toml (hoặc ACCOUNTS_CONFIG_PATH env var) chỉ dùng khi DB trống
 //
 // Admin API (mount trong routes/api.rs):
 //   GET  /api/accounts            → list all accounts + stats
@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
+
+use crate::db::DbPool;
 
 use self::auth_store::{
     discover_codex_accounts, parse_jwt_from_auth_file, JwtMetadata, PlanType, QuotaHealth,
@@ -79,10 +81,23 @@ fn default_cooldown_secs() -> u64 {
 
 const MAX_RATE_LIMIT_TTL_SECS: u64 = 6 * 60 * 60;
 
-fn default_accounts_config_path() -> PathBuf {
-    std::env::var("ACCOUNTS_CONFIG_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("accounts.toml"))
+fn default_proxy_db_path() -> PathBuf {
+    if let Ok(path) = std::env::var("CLAUDE_CODEX_PROXY_DB_PATH") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(shellexpand::tilde(trimmed).into_owned());
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".claude-codex-proxy")
+            .join("proxy.db");
+    }
+
+    std::env::temp_dir()
+        .join("claude-codex-proxy")
+        .join("proxy.db")
 }
 
 // ─── Runtime state (in-memory, not persisted) ─────────────────────────────────
@@ -458,9 +473,16 @@ pub struct AccountPool {
     counter: AtomicUsize,
     config: PoolConfig,
     config_path: Option<PathBuf>,
+    db: Option<DbPool>,
 }
 
 impl AccountPool {
+    fn parse_config_file(path: &str) -> anyhow::Result<AccountsConfig> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Cannot read accounts config '{}': {}", path, e))?;
+        toml::from_str(&content).map_err(|e| anyhow::anyhow!("Invalid accounts.toml: {}", e))
+    }
+
     fn from_entries(
         entries: Vec<AccountEntry>,
         config: PoolConfig,
@@ -471,10 +493,35 @@ impl AccountPool {
             counter: AtomicUsize::new(0),
             config,
             config_path,
+            db: None,
+        })
+    }
+
+    fn from_entries_with_db(
+        entries: Vec<AccountEntry>,
+        config: PoolConfig,
+        db: DbPool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            accounts: RwLock::new(entries),
+            counter: AtomicUsize::new(0),
+            config,
+            config_path: None,
+            db: Some(db),
         })
     }
 
     async fn persist_config(&self) -> anyhow::Result<()> {
+        if let Some(db) = self.db.as_ref() {
+            let accounts = self.accounts.read().await;
+            let snapshot = AccountsConfig {
+                account: accounts.iter().map(|entry| entry.config.clone()).collect(),
+                pool: self.config.clone(),
+            };
+            db.replace_accounts_config(&snapshot)?;
+            return Ok(());
+        }
+
         let Some(path) = self.config_path.as_ref() else {
             return Ok(());
         };
@@ -510,10 +557,7 @@ impl AccountPool {
 
     /// Load từ accounts.toml. Trả lỗi nếu file không tồn tại hoặc parse fail.
     pub fn from_config_file(path: &str) -> anyhow::Result<Arc<Self>> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("Cannot read accounts config '{}': {}", path, e))?;
-        let cfg: AccountsConfig = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Invalid accounts.toml: {}", e))?;
+        let cfg = Self::parse_config_file(path)?;
 
         let entries = cfg.account.iter().map(AccountEntry::from_config).collect();
         log::info!(
@@ -543,11 +587,7 @@ impl AccountPool {
             entry.state.plan_type,
             entry.state.email.as_deref().unwrap_or("unknown")
         );
-        Self::from_entries(
-            vec![entry],
-            PoolConfig::default(),
-            Some(default_accounts_config_path()),
-        )
+        Self::from_entries(vec![entry], PoolConfig::default(), None)
     }
 
     /// Trả auth_path của account tiếp theo theo round-robin.
@@ -1087,36 +1127,108 @@ fn duration_unit_multiplier(unit: &str) -> Option<u64> {
     }
 }
 
-// ─── Load helper ─────────────────────────────────────────────────────────────
-
-/// Quyết định dùng pool từ file, auto-discovery, hay single-account fallback.
-/// Priority: ACCOUNTS_CONFIG_PATH > accounts.toml > auto-discover > PROXY_AUTH_PATH
-pub fn load_pool() -> Arc<AccountPool> {
-    // 1. Explicit env var
-    if let Ok(path) = std::env::var("ACCOUNTS_CONFIG_PATH") {
-        match AccountPool::from_config_file(&path) {
-            Ok(pool) => return pool,
-            Err(e) => log::error!("[account_pool] Failed to load '{}': {}", path, e),
+fn open_accounts_db() -> Option<DbPool> {
+    let path = default_proxy_db_path();
+    match crate::db::Db::open(path.to_string_lossy().as_ref()) {
+        Ok(db) => Some(db),
+        Err(error) => {
+            log::error!(
+                "[account_pool] Failed to open SQLite inventory '{}': {}",
+                path.display(),
+                error
+            );
+            None
         }
     }
+}
 
-    // 2. Default accounts.toml in CWD
-    if std::path::Path::new("accounts.toml").exists() {
-        match AccountPool::from_config_file("accounts.toml") {
-            Ok(pool) => return pool,
-            Err(e) => {
-                log::warn!(
-                    "[account_pool] accounts.toml found but failed to parse: {}",
-                    e
+fn load_legacy_accounts_config() -> Option<(AccountsConfig, PathBuf)> {
+    if let Ok(path) = std::env::var("ACCOUNTS_CONFIG_PATH") {
+        match AccountPool::parse_config_file(&path) {
+            Ok(config) => return Some((config, PathBuf::from(path))),
+            Err(error) => {
+                log::error!(
+                    "[account_pool] Failed to load legacy config '{}': {}",
+                    path,
+                    error
                 )
             }
         }
     }
 
+    let default_path = PathBuf::from("accounts.toml");
+    if default_path.exists() {
+        match AccountPool::parse_config_file(default_path.to_string_lossy().as_ref()) {
+            Ok(config) => return Some((config, default_path)),
+            Err(error) => log::warn!(
+                "[account_pool] accounts.toml found but failed to parse: {}",
+                error
+            ),
+        }
+    }
+
+    None
+}
+
+// ─── Load helper ─────────────────────────────────────────────────────────────
+
+/// Quyết định dùng pool từ SQLite inventory, legacy import, auto-discovery, hay single-account fallback.
+/// Priority: SQLite inventory > legacy config import (one-time) > auto-discover > PROXY_AUTH_PATH
+pub fn load_pool() -> Arc<AccountPool> {
+    let db = open_accounts_db();
+
+    if let Some(db) = db.as_ref() {
+        match db.load_accounts_config() {
+            Ok(cfg) if !cfg.account.is_empty() => {
+                let entries = cfg.account.iter().map(AccountEntry::from_config).collect();
+                log::info!(
+                    "[account_pool] Loaded {} account(s) from SQLite inventory",
+                    cfg.account.len()
+                );
+                return AccountPool::from_entries_with_db(entries, cfg.pool, db.clone());
+            }
+            Ok(_) => {
+                log::info!("[account_pool] SQLite inventory is empty; continuing bootstrap");
+            }
+            Err(error) => {
+                log::error!(
+                    "[account_pool] Failed to read SQLite inventory during bootstrap: {}",
+                    error
+                );
+            }
+        }
+    }
+
+    if let Some((cfg, path)) = load_legacy_accounts_config() {
+        let entries = cfg
+            .account
+            .iter()
+            .map(AccountEntry::from_config)
+            .collect::<Vec<_>>();
+        log::info!(
+            "[account_pool] Imported {} legacy account(s) from '{}'",
+            cfg.account.len(),
+            path.display()
+        );
+
+        if let Some(db) = db.as_ref() {
+            if let Err(error) = db.replace_accounts_config(&cfg) {
+                log::error!(
+                    "[account_pool] Failed to persist imported legacy accounts into SQLite: {}",
+                    error
+                );
+                return AccountPool::from_entries(entries, cfg.pool, Some(path));
+            }
+            return AccountPool::from_entries_with_db(entries, cfg.pool, db.clone());
+        }
+
+        return AccountPool::from_entries(entries, cfg.pool, Some(path));
+    }
+
     // 3. Auto-discover from known Codex auth locations
     let discovered = discover_codex_accounts();
     if !discovered.is_empty() {
-        let entries: Vec<AccountEntry> = discovered
+        let configs: Vec<AccountConfig> = discovered
             .iter()
             .enumerate()
             .map(|(i, d)| {
@@ -1130,15 +1242,18 @@ pub fn load_pool() -> Arc<AccountPool> {
                     .as_ref()
                     .map(|e| e.split('@').next().unwrap_or(&id).to_string())
                     .unwrap_or_else(|| id.clone());
-                let cfg = AccountConfig {
+                AccountConfig {
                     id,
                     label: Some(label),
                     auth_path: d.auth_path.clone(),
                     enabled: !d.token_expired,
-                };
-                AccountEntry::from_config(&cfg)
+                }
             })
             .collect();
+        let entries = configs
+            .iter()
+            .map(AccountEntry::from_config)
+            .collect::<Vec<_>>();
 
         log::info!(
             "[account_pool] Auto-discovered {} account(s)",
@@ -1154,11 +1269,22 @@ pub fn load_pool() -> Arc<AccountPool> {
             );
         }
 
-        return AccountPool::from_entries(
-            entries,
-            PoolConfig::default(),
-            Some(default_accounts_config_path()),
-        );
+        if let Some(db) = db.as_ref() {
+            let snapshot = AccountsConfig {
+                account: configs,
+                pool: PoolConfig::default(),
+            };
+            if let Err(error) = db.replace_accounts_config(&snapshot) {
+                log::error!(
+                    "[account_pool] Failed to persist discovered accounts into SQLite: {}",
+                    error
+                );
+                return AccountPool::from_entries(entries, PoolConfig::default(), None);
+            }
+            return AccountPool::from_entries_with_db(entries, PoolConfig::default(), db.clone());
+        }
+
+        return AccountPool::from_entries(entries, PoolConfig::default(), None);
     }
 
     // 4. Fallback: single account từ PROXY_AUTH_PATH
@@ -1168,6 +1294,28 @@ pub fn load_pool() -> Arc<AccountPool> {
         "[account_pool] Using single-account mode with auth_path={}",
         auth_path
     );
+    if let Some(db) = db.as_ref() {
+        let cfg = AccountConfig {
+            id: "default".to_string(),
+            label: Some("Default".to_string()),
+            auth_path: auth_path.clone(),
+            enabled: true,
+        };
+        let entry = AccountEntry::from_config(&cfg);
+        let snapshot = AccountsConfig {
+            account: vec![cfg],
+            pool: PoolConfig::default(),
+        };
+        if let Err(error) = db.replace_accounts_config(&snapshot) {
+            log::error!(
+                "[account_pool] Failed to persist single-account fallback into SQLite: {}",
+                error
+            );
+            return AccountPool::single(&auth_path);
+        }
+        return AccountPool::from_entries_with_db(vec![entry], PoolConfig::default(), db.clone());
+    }
+
     AccountPool::single(&auth_path)
 }
 
@@ -1210,6 +1358,7 @@ mod tests {
             counter: AtomicUsize::new(0),
             config: PoolConfig::default(),
             config_path: None,
+            db: None,
         })
     }
 
@@ -1317,7 +1466,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn sync_discovered_persists_new_accounts() {
+    async fn sync_discovered_persists_new_accounts_to_sqlite_inventory() {
         let _guard = env_lock().lock().expect("lock env");
         let temp_dir = std::env::temp_dir().join(format!("accounts-sync-{}", uuid::Uuid::new_v4()));
         let codex_home = temp_dir.join(".codex");
@@ -1327,21 +1476,25 @@ mod tests {
             r#"{"OPENAI_API_KEY":"sk-test","tokens":null}"#,
         )
         .unwrap();
-        let config_path = temp_dir.join("accounts.toml");
+        let db_path = temp_dir.join("proxy.db");
 
         let previous_home = std::env::var("HOME").ok();
         let previous_codex_home = std::env::var("CODEX_HOME").ok();
+        let previous_db_path = std::env::var("CLAUDE_CODEX_PROXY_DB_PATH").ok();
+        let previous_accounts_config_path = std::env::var("ACCOUNTS_CONFIG_PATH").ok();
         std::env::set_var("HOME", temp_dir.display().to_string());
         std::env::set_var("CODEX_HOME", codex_home.display().to_string());
+        std::env::set_var("CLAUDE_CODEX_PROXY_DB_PATH", db_path.display().to_string());
+        std::env::remove_var("ACCOUNTS_CONFIG_PATH");
 
-        let pool =
-            AccountPool::from_entries(Vec::new(), PoolConfig::default(), Some(config_path.clone()));
+        let db = crate::db::Db::open(db_path.to_str().unwrap()).unwrap();
+        let pool = AccountPool::from_entries_with_db(Vec::new(), PoolConfig::default(), db.clone());
         let synced = pool.sync_discovered().await.unwrap();
         assert_eq!(synced.len(), 1);
         assert_eq!(pool.list().await.len(), 1);
-        assert!(config_path.exists());
+        assert_eq!(db.load_accounts_config().unwrap().account.len(), 1);
 
-        let reloaded = AccountPool::from_config_file(config_path.to_str().unwrap()).unwrap();
+        let reloaded = load_pool();
         assert_eq!(reloaded.list().await.len(), 1);
 
         if let Some(home) = previous_home {
@@ -1354,7 +1507,125 @@ mod tests {
         } else {
             std::env::remove_var("CODEX_HOME");
         }
-        let _ = std::fs::remove_file(config_path);
+        if let Some(db_path) = previous_db_path {
+            std::env::set_var("CLAUDE_CODEX_PROXY_DB_PATH", db_path);
+        } else {
+            std::env::remove_var("CLAUDE_CODEX_PROXY_DB_PATH");
+        }
+        if let Some(config_path) = previous_accounts_config_path {
+            std::env::set_var("ACCOUNTS_CONFIG_PATH", config_path);
+        } else {
+            std::env::remove_var("ACCOUNTS_CONFIG_PATH");
+        }
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_pool_imports_legacy_accounts_toml_into_sqlite_once() {
+        let _guard = env_lock().lock().expect("lock env");
+        let temp_dir =
+            std::env::temp_dir().join(format!("accounts-legacy-import-{}", uuid::Uuid::new_v4()));
+        let legacy_auth_dir = temp_dir.join("legacy");
+        std::fs::create_dir_all(&legacy_auth_dir).unwrap();
+        let auth_path = legacy_auth_dir.join("auth.json");
+        std::fs::write(
+            &auth_path,
+            r#"{"tokens":{"access_token":"token-a","refresh_token":"refresh-a","account_id":"acc-a"}}"#,
+        )
+        .unwrap();
+
+        let config_path = temp_dir.join("accounts.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[[account]]\nid = \"legacy\"\nlabel = \"Legacy\"\nauth_path = \"{}\"\nenabled = true\n",
+                auth_path.display()
+            ),
+        )
+        .unwrap();
+
+        let db_path = temp_dir.join("proxy.db");
+        let previous_db_path = std::env::var("CLAUDE_CODEX_PROXY_DB_PATH").ok();
+        let previous_accounts_config_path = std::env::var("ACCOUNTS_CONFIG_PATH").ok();
+        std::env::set_var("CLAUDE_CODEX_PROXY_DB_PATH", db_path.display().to_string());
+        std::env::set_var("ACCOUNTS_CONFIG_PATH", config_path.display().to_string());
+
+        let first = load_pool();
+        let first_accounts = first.list().await;
+        assert_eq!(first_accounts.len(), 1);
+        assert_eq!(first_accounts[0].id, "legacy");
+
+        let db = crate::db::Db::open(db_path.to_str().unwrap()).unwrap();
+        assert_eq!(db.load_accounts_config().unwrap().account.len(), 1);
+
+        std::fs::remove_file(&config_path).unwrap();
+
+        let second = load_pool();
+        let second_accounts = second.list().await;
+        assert_eq!(second_accounts.len(), 1);
+        assert_eq!(second_accounts[0].id, "legacy");
+
+        if let Some(db_path) = previous_db_path {
+            std::env::set_var("CLAUDE_CODEX_PROXY_DB_PATH", db_path);
+        } else {
+            std::env::remove_var("CLAUDE_CODEX_PROXY_DB_PATH");
+        }
+        if let Some(config_path) = previous_accounts_config_path {
+            std::env::set_var("ACCOUNTS_CONFIG_PATH", config_path);
+        } else {
+            std::env::remove_var("ACCOUNTS_CONFIG_PATH");
+        }
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_pool_prefers_sqlite_inventory_over_legacy_accounts_file() {
+        let _guard = env_lock().lock().expect("lock env");
+        let temp_dir =
+            std::env::temp_dir().join(format!("accounts-sqlite-priority-{}", uuid::Uuid::new_v4()));
+        let db_path = temp_dir.join("proxy.db");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let db = crate::db::Db::open(db_path.to_str().unwrap()).unwrap();
+        db.replace_accounts_config(&AccountsConfig {
+            account: vec![AccountConfig {
+                id: "sqlite".to_string(),
+                label: Some("SQLite".to_string()),
+                auth_path: "/tmp/sqlite/auth.json".to_string(),
+                enabled: true,
+            }],
+            pool: PoolConfig::default(),
+        })
+        .unwrap();
+
+        let config_path = temp_dir.join("accounts.toml");
+        std::fs::write(
+            &config_path,
+            "[[account]]\nid = \"legacy\"\nlabel = \"Legacy\"\nauth_path = \"/tmp/legacy/auth.json\"\nenabled = true\n",
+        )
+        .unwrap();
+
+        let previous_db_path = std::env::var("CLAUDE_CODEX_PROXY_DB_PATH").ok();
+        let previous_accounts_config_path = std::env::var("ACCOUNTS_CONFIG_PATH").ok();
+        std::env::set_var("CLAUDE_CODEX_PROXY_DB_PATH", db_path.display().to_string());
+        std::env::set_var("ACCOUNTS_CONFIG_PATH", config_path.display().to_string());
+
+        let pool = load_pool();
+        let accounts = pool.list().await;
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "sqlite");
+
+        if let Some(db_path) = previous_db_path {
+            std::env::set_var("CLAUDE_CODEX_PROXY_DB_PATH", db_path);
+        } else {
+            std::env::remove_var("CLAUDE_CODEX_PROXY_DB_PATH");
+        }
+        if let Some(config_path) = previous_accounts_config_path {
+            std::env::set_var("ACCOUNTS_CONFIG_PATH", config_path);
+        } else {
+            std::env::remove_var("ACCOUNTS_CONFIG_PATH");
+        }
         let _ = std::fs::remove_dir_all(temp_dir);
     }
 

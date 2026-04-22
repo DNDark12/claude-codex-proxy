@@ -276,9 +276,9 @@ async function load() {
     document.getElementById('st-disabled').textContent = disabled;
 
     if (accounts.length === 0) {
-      document.getElementById('accounts-table').innerHTML = `
-        <div class="loading">No accounts. Click "Add Account" to get started.<br>
-        <small style="color:var(--muted);margin-top:8px;display:block">Or create an accounts.toml file and restart.</small></div>`;
+    document.getElementById('accounts-table').innerHTML = `
+      <div class="loading">No accounts. Click "Add Account" to get started.<br>
+      <small style="color:var(--muted);margin-top:8px;display:block">Legacy \`accounts.toml\` can be imported once, but steady-state inventory is stored in SQLite.</small></div>`;
       return;
     }
 

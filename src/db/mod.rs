@@ -14,8 +14,11 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+use crate::accounts::{AccountConfig, AccountsConfig, PoolConfig};
+
 pub type DbPool = Arc<Db>;
 
+#[derive(Debug)]
 pub struct Db {
     conn: Mutex<Connection>,
 }
@@ -49,6 +52,88 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(include_str!("schema.sql"))?;
         Ok(())
+    }
+
+    pub fn load_accounts_config(&self) -> anyhow::Result<AccountsConfig> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, label, auth_path, enabled
+             FROM accounts
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AccountConfig {
+                id: row.get(0)?,
+                label: row.get(1)?,
+                auth_path: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+            })
+        })?;
+        let accounts = rows.collect::<Result<Vec<_>, _>>()?;
+
+        let pool = conn
+            .query_row(
+                "SELECT error_threshold, cooldown_secs
+                 FROM account_pool_settings
+                 WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(PoolConfig {
+                        error_threshold: row.get(0)?,
+                        cooldown_secs: row.get(1)?,
+                    })
+                },
+            )
+            .unwrap_or_else(|_| PoolConfig::default());
+
+        Ok(AccountsConfig {
+            account: accounts,
+            pool,
+        })
+    }
+
+    pub fn replace_accounts_config(&self, config: &AccountsConfig) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        tx.execute("DELETE FROM accounts", [])?;
+        for account in &config.account {
+            tx.execute(
+                "INSERT INTO accounts (id, label, auth_path, enabled, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    account.id,
+                    account.label,
+                    account.auth_path,
+                    if account.enabled { 1 } else { 0 },
+                    now,
+                    now
+                ],
+            )?;
+        }
+
+        tx.execute(
+            "INSERT INTO account_pool_settings (singleton, error_threshold, cooldown_secs, updated_at)
+             VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(singleton) DO UPDATE SET
+               error_threshold = excluded.error_threshold,
+               cooldown_secs   = excluded.cooldown_secs,
+               updated_at      = excluded.updated_at",
+            params![
+                config.pool.error_threshold,
+                config.pool.cooldown_secs,
+                now
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn account_count(&self) -> anyhow::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))?)
     }
 }
 

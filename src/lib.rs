@@ -2,6 +2,7 @@ pub mod accounts;
 pub mod adapters;
 pub mod app_server;
 pub mod cli;
+pub mod db;
 pub mod domain;
 pub mod jobs;
 pub mod mapping;

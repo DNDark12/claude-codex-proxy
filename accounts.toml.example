@@ -1,3 +1,7 @@
+# Legacy import example only.
+# The proxy now persists account inventory in SQLite.
+# Use this file only if you want a one-time bootstrap via ACCOUNTS_CONFIG_PATH.
+
 [pool]
 error_threshold = 3
 cooldown_secs = 120

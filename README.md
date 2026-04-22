@@ -101,7 +101,7 @@ eval "$(cargo run -- env --shell zsh)"
 For the full feature set, use:
 
 1. `auto-hybrid` mode
-2. a multi-account pool in `accounts.toml`
+2. a multi-account inventory persisted in SQLite
 3. JSONL persistence for jobs/sessions
 4. thread reuse enabled for explicit continuation flows
 
@@ -109,7 +109,6 @@ Example local setup:
 
 ```bash
 cp .env.example .env
-cp accounts.toml.example accounts.toml
 mkdir -p data
 ```
 
@@ -118,7 +117,7 @@ Recommended env values:
 ```bash
 PROXY_PORT=8080
 PROXY_AUTH_PATH=~/.codex/auth.json
-ACCOUNTS_CONFIG_PATH=./accounts.toml
+CLAUDE_CODEX_PROXY_DB_PATH=~/.claude-codex-proxy/proxy.db
 ENABLE_TOKEN_PASTE=true
 APP_SERVER_TURN_TIMEOUT_SECS=300
 CLAUDE_CODEX_PROXY_JSONRPC_TIMEOUT_SECS=300
@@ -260,37 +259,19 @@ Proxy hỗ trợ nhiều tài khoản Codex xoay vòng tự động (round-robin
 ### Setup
 
 ```bash
-# 1. Copy config mẫu
-cp accounts.toml.example accounts.toml
+# 1. Đảm bảo DB path nằm ngoài repo
+export CLAUDE_CODEX_PROXY_DB_PATH=~/.claude-codex-proxy/proxy.db
 
-# 2. Điền thông tin tài khoản
+# 2. Start proxy rồi thêm account qua UI /accounts hoặc POST /api/accounts
 # Mỗi auth.json tương ứng 1 tài khoản ChatGPT Plus/Codex
-```
-
-`accounts.toml`:
-```toml
-[pool]
-error_threshold = 3    # degraded sau 3 lỗi liên tiếp
-cooldown_secs = 120    # tự recover sau 2 phút
-
-[[account]]
-id = "account_1"
-label = "Account Chính"
-auth_path = "~/.codex/auth_1.json"
-enabled = true
-
-[[account]]
-id = "account_2"
-label = "Account Phụ"
-auth_path = "~/.codex/auth_2.json"
-enabled = true
 ```
 
 **Load priority:**
 
-1. `ACCOUNTS_CONFIG_PATH` env var
-2. `accounts.toml` trong thư mục hiện tại
-3. `PROXY_AUTH_PATH` (single account, backward compat)
+1. SQLite inventory (`CLAUDE_CODEX_PROXY_DB_PATH`)
+2. one-time import từ `ACCOUNTS_CONFIG_PATH` hoặc `./accounts.toml` nếu DB đang trống
+3. auto-discover auth files
+4. `PROXY_AUTH_PATH` (single account, backward compat)
 
 ### Account rotation logic
 
@@ -306,10 +287,17 @@ enabled = true
 - Trong UI `/accounts`, nút `Scan` sẽ scan các auth file đang có và **tự đồng bộ vào pool**
 - `Scan` hiện đọc các auth file từ `PROXY_AUTH_PATH`, `$CODEX_HOME/auth.json`, `$CODEX_HOME/proxy-accounts/*/auth.json`, và `$CODEX_HOME/multi-auth/projects/*/auth.json`
 - Khi `CLAUDE_CODEX_PROXY_ACCOUNT_AUTO_SYNC=true`, proxy cũng tự rescan định kỳ trước lúc dispatch request; bạn không cần bấm `Scan` chỉ để pickup một `auth.json` mới hơn
-- Account được thêm/toggle/remove qua UI sẽ được persist về `accounts.toml` hoặc `ACCOUNTS_CONFIG_PATH`
-- Khi restart service, danh sách pool sẽ được load lại từ file config đã persist
+- Account được thêm/toggle/remove qua UI sẽ được persist về SQLite inventory tại `CLAUDE_CODEX_PROXY_DB_PATH`
+- Khi restart service, danh sách pool sẽ được load lại từ SQLite inventory đã persist
 - Nếu cùng một `auth_path` được login lại bằng account khác rồi `Scan`, proxy sẽ refresh metadata, clear stale quota/auth penalty của entry đó, và request kế tiếp sẽ khởi động lại app-server runtime theo auth file mới
 - Nếu một account có nhiều alias path và một alias được refresh mới hơn, proxy sẽ mirror auth mới sang alias cũ của cùng account khi auto-sync/manual sync chạy; điều này giúp session đang bám path cũ tiếp tục có credential mới
+
+### Legacy import from `accounts.toml`
+
+- Nếu bạn đang có `accounts.toml` cũ, set `ACCOUNTS_CONFIG_PATH` tạm thời rồi khởi động proxy một lần
+- Proxy sẽ import inventory đó vào SQLite **chỉ khi DB đang trống**
+- Sau khi import xong, có thể bỏ `ACCOUNTS_CONFIG_PATH`; SQLite là source-of-truth steady-state
+- Không nên tiếp tục lưu account inventory trong workspace-local `accounts.toml`
 
 ### Auth refresh reality
 
@@ -360,10 +348,9 @@ Sau khi start server, truy cập:
 ### Quick start
 
 ```bash
-# 1. Tạo config dir
-mkdir config
-cp accounts.toml.example config/accounts.toml
-cp ~/.codex/auth.json config/auth.json
+# 1. Tạo data dir ngoài repo hoặc mount volume riêng cho DB/auth
+mkdir -p ~/.claude-codex-proxy
+cp ~/.codex/auth.json ~/.claude-codex-proxy/auth.json
 
 # 2. Chạy
 docker compose up -d
@@ -413,7 +400,8 @@ CLAUDE_CODEX_PROXY_SESSIONS_JSONL=./data/sessions.jsonl
 | Env Var | Default | Mô tả |
 |---------|---------|-------|
 | `PROXY_PORT` | `8080` | Listen port |
-| `ACCOUNTS_CONFIG_PATH` | `./accounts.toml` khi set | Path tới accounts.toml |
+| `CLAUDE_CODEX_PROXY_DB_PATH` | `~/.claude-codex-proxy/proxy.db` | SQLite path cho account inventory |
+| `ACCOUNTS_CONFIG_PATH` | unset | Legacy one-time import path cho `accounts.toml` khi DB đang trống |
 | `PROXY_AUTH_PATH` | `~/.codex/auth.json` | Single account fallback |
 | `ENABLE_TOKEN_PASTE` | `false` | Cho phép add account bằng raw auth/token qua UI/API |
 | `RUST_LOG` | `info` | Log level |
@@ -433,7 +421,7 @@ CLAUDE_CODEX_PROXY_SESSIONS_JSONL=./data/sessions.jsonl
 
 ## Security Notes (Updated)
 
-- **Không commit** `.env`, `accounts.toml`, `auth*.json` lên git
+- **Không commit** `.env`, SQLite inventory local, `accounts.toml`, `auth*.json` lên git
 - UI và Admin API (`/`, `/accounts`, `/sessions`, `/api/accounts/*`) chỉ expose trên localhost theo mặc định
 - Nếu expose ra ngoài: dùng reverse proxy (nginx/caddy) với authentication
 - Token trong `auth.json` là credential của tài khoản ChatGPT Plus — bảo vệ như password

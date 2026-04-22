@@ -645,6 +645,15 @@ async fn drive_job_events(
                     ).await?;
                     if done {
                         let final_job = context.jobs.get(&job_id).await;
+                        // Determine if this was the final turn for the job
+                        let is_final_turn = final_job
+                            .as_ref()
+                            .map(|job| {
+                                matches!(job.status, JobStatus::Completed
+                                    | JobStatus::Cancelled
+                                    | JobStatus::Failed)
+                            })
+                            .unwrap_or(false);
                         let success = final_job
                             .as_ref()
                             .map(|job| matches!(job.status, JobStatus::Completed))
@@ -653,16 +662,18 @@ async fn drive_job_events(
                             remember_last_assistant_message(&context.sessions, &thread_id, &text)
                                 .await;
                         }
-                        if success {
+                        // Only release the lease if this was the final turn of the job
+                        if is_final_turn {
                             if let Some(lease) = lease.as_ref() {
                                 context
                                     .thread_pool
                                     .release(lease, true, std::time::Instant::now())
                                     .await;
                             }
-                        } else if let Some(lease) = lease.as_ref() {
-                            context.thread_pool.invalidate(&lease.thread_id).await;
+                        } else {
+                            // Do not release yet: keep thread leased for potential continuation turns
                         }
+                        // Update pool statistics if we know the final job state
                         if let (Some(pool), Some(job)) = (context.pool.as_ref(), final_job.as_ref()) {
                             if let Some(auth_path) = job.account_auth_path.as_ref() {
                                 let auth_path = std::path::PathBuf::from(auth_path);

@@ -24,6 +24,7 @@ Thumbs.db
 
 # Auth files (sensitive)
 auth.json
+accounts.toml
 *.pem
 *.key
 
@@ -39,6 +40,11 @@ auth.json
 *.jsonl
 jobs.jsonl
 sessions.jsonl
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
 
 # Codex app-server data directory
 .codex-proxy-data/
